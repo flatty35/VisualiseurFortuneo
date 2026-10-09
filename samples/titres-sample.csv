@@ -1,0 +1,5 @@
+libellé;Opération;Place;Date;Qté;Prix d'éxé;Montant brut;Courtage/Prélèvement;Montant net;Devise
+TOTALENERGIES SE;Achat Comptant;Euronext Paris;15/01/2024;10.0;60.50;-605.00;-1.50;-606.50;EUR
+AIR LIQUIDE;Achat Comptant;Euronext Paris;10/03/2024;2.0;160.00;-320.00;0.0;-320.00;EUR
+TOTALENERGIES SE;Vente comptant;Euronext Paris;20/06/2024;5.0;65.00;325.00;-1.00;324.00;EUR
+TOTALENERGIES SE;Encaissement coupons intérêt/dividende;Euronext Paris;02/06/2024;10.0;0.0;29.0;0.0;29.0;EUR
