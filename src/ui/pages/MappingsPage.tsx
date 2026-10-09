@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EnvelopeType, Support } from '@/domain/types'
-import { db } from '@/persist/db'
+import { loadProjected } from '@/persist/portfolioStore'
 import {
   isValidIsin,
   normalizeSupportKey,
@@ -55,11 +55,9 @@ export default function MappingsPage() {
     // Label-only Fortuneo rows → LOCAL supports (incl. titres sortis)
     await ensureHistoricalSupports()
 
-    const [supports, operations, openings] = await Promise.all([
-      db.supports.orderBy('name').toArray(),
-      db.operations.toArray(),
-      db.virtualOpenings.toArray(),
-    ])
+    const { supports, operations, virtualOpenings: openings } =
+      await loadProjected()
+    supports.sort((a, b) => a.name.localeCompare(b.name, 'fr'))
 
     const held = new Set<string>()
     const envelopesByIsin = new Map<string, Set<EnvelopeType>>()

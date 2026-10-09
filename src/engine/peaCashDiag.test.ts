@@ -12,6 +12,9 @@ import { assignSupportKeys, buildNameToIsin } from '@/import/resolveIsin'
 import { reconstructVirtualOpening } from '@/import/reconstructBackward'
 import { cashImpact } from '@/engine/cashImpact'
 import { buildHoldingsSeries } from '@/engine/positions'
+import { applyVirtualOpeningSeeds, projectPortfolio } from '@/domain/flatAdapters'
+import { portfolioFromV1 } from '@/persist/migrateV1'
+import { seedsFromVirtualOpening } from '@/import/reconstructBackward'
 
 const PEA = join(process.cwd(), 'testData', 'PEA')
 
@@ -72,5 +75,21 @@ describe('PEA testData cash (espèces ledger)', () => {
     expect(titres.reduce((s, o) => s + cashImpact(o), 0)).toBe(0)
     expect(vo.cash + ledgerNet).toBeCloseTo(0, 0)
     expect(last?.cash).toBeCloseTo(0, 0)
+
+    // Same cash after v1 → Portfolio → flat projection
+    const seeds = seedsFromVirtualOpening(vo)
+    const portfolio = portfolioFromV1({
+      operations: [...all, ...seeds],
+      supports: [],
+      virtualOpenings: [vo],
+    })
+    applyVirtualOpeningSeeds(portfolio, vo)
+    const projected = projectPortfolio(portfolio)
+    const holdings2 = buildHoldingsSeries({
+      envelope: 'PEA',
+      operations: projected.operations.filter((o) => o.envelope === 'PEA'),
+      virtualOpening: projected.virtualOpenings.find((v) => v.envelope === 'PEA'),
+    })
+    expect(holdings2[0]?.cash).toBeCloseTo(first!.cash, 0)
   })
 })

@@ -12,7 +12,7 @@ import {
 import { isValidIsin, rekeySupport } from '@/persist/rekeySupport'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import type { Support } from '@/domain/types'
-import { db } from '@/persist/db'
+import { listFlatSupports } from '@/persist/portfolioStore'
 
 export interface IsinCandidate {
   isin: string
@@ -536,7 +536,7 @@ export async function autoResolveLocalIsins(
     }) => void
   },
 ): Promise<AutoIsinResult> {
-  let list = supports ?? (await db.supports.toArray())
+  let list = supports ?? (await listFlatSupports())
   if (!options?.force) {
     list = list.filter((s) => isLocalSupportId(s.isin))
   } else {

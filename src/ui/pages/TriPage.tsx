@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { EnvelopeType } from '@/domain/types'
-import { db } from '@/persist/db'
+import { loadEnvelopeProjected } from '@/persist/portfolioStore'
 import { computePortfolioTri } from '@/engine/tri'
 import { ensureHistoricalSupports } from '@/import/ensureHistoricalSupports'
 import { getAllQuoteMaps } from '@/quotes/localQuoteCache'
@@ -14,17 +14,15 @@ export default function TriPage() {
 
   const { data, loading } = useAsyncData(async () => {
     await ensureHistoricalSupports()
-    const [operations, supports, vo, quotes] = await Promise.all([
-      db.operations.where('envelope').equals(envelope).toArray(),
-      db.supports.toArray(),
-      db.virtualOpenings.get(envelope),
+    const [projected, quotes] = await Promise.all([
+      loadEnvelopeProjected(envelope),
       getAllQuoteMaps(),
     ])
+    const { operations, supports, virtualOpening: vo } = projected
     const dates = operations.map((o) => o.date).sort()
     const isinSet = new Set(
       operations.map((o) => o.isin).filter((x): x is string => Boolean(x)),
     )
-    // Prefer name labels; sort held-like (supports order) then alpha
     const isins = [...isinSet].sort((a, b) => {
       const na = supports.find((s) => s.isin === a)?.name ?? a
       const nb = supports.find((s) => s.isin === b)?.name ?? b

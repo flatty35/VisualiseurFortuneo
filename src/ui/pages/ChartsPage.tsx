@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChartPeriod, EnvelopeType } from '@/domain/types'
-import { db } from '@/persist/db'
+import { loadEnvelopeProjected } from '@/persist/portfolioStore'
 import { buildHoldingsSeries } from '@/engine/positions'
 import { buildCashSpikeSeries } from '@/engine/cashSeries'
 import { buildOperationMarkers } from '@/engine/markers'
@@ -59,13 +59,16 @@ export default function ChartsPage() {
     } catch (e) {
       console.warn('ensureHistoricalSupports', e)
     }
-    const [operations, supports, vo, quotes] = await Promise.all([
-      db.operations.where('envelope').equals(envelope).toArray(),
-      db.supports.toArray(),
-      db.virtualOpenings.get(envelope),
+    const [projected, quotes] = await Promise.all([
+      loadEnvelopeProjected(envelope),
       getAllQuoteMaps(),
     ])
-    return { operations, supports, vo: vo ?? null, quotes }
+    return {
+      operations: projected.operations,
+      supports: projected.supports,
+      vo: projected.virtualOpening,
+      quotes,
+    }
   }, [envelope])
 
   const model = useMemo(() => {

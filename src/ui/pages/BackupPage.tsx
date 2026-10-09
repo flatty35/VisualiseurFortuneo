@@ -18,7 +18,14 @@ export default function BackupPage() {
     try {
       const bundle = await buildExportBundle(true)
       downloadExport(bundle)
-      setMsg(`Export généré — ${bundle.operations.length} opérations`)
+      const nOps =
+        bundle.portfolio?.envelopes?.reduce(
+          (n, e) => n + (e.operations?.length ?? 0),
+          0,
+        ) ??
+        bundle.operations?.length ??
+        0
+      setMsg(`Export généré — ${nOps} opérations (schema v${bundle.meta.schemaVersion})`)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
@@ -30,7 +37,14 @@ export default function BackupPage() {
     try {
       const bundle = await parseExportFile(file)
       await importBundle(bundle, mode)
-      setMsg(`Import ${mode} OK — ${bundle.operations.length} opérations dans le fichier`)
+      const nOps =
+        bundle.portfolio?.envelopes?.reduce(
+          (n, e) => n + (e.operations?.length ?? 0),
+          0,
+        ) ??
+        bundle.operations?.length ??
+        0
+      setMsg(`Import ${mode} OK — ${nOps} opérations dans le fichier`)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }

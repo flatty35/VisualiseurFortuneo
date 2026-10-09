@@ -1,5 +1,5 @@
 import type { Support } from '@/domain/types'
-import { db } from '@/persist/db'
+import { listFlatSupports, putFlatSupport } from '@/persist/portfolioStore'
 import {
   isProxyConfigured,
   mapIsinOpenFigi,
@@ -363,14 +363,14 @@ export async function searchTickerCandidates(input: {
 
 /** Instant local seed match only (no network) — safe during import. */
 export async function applySeedMatches(supports?: Support[]): Promise<number> {
-  const list = supports ?? (await db.supports.toArray())
+  const list = supports ?? (await listFlatSupports())
   let updated = 0
   for (const s of list) {
     if (s.yahooTicker) continue
     const seeded = lookupSeedTicker(s.name)
     if (!seeded) continue
     const g = googleTickerFromYahoo(seeded)
-    await db.supports.put({
+    await putFlatSupport({
       ...s,
       yahooTicker: seeded,
       googleTicker: s.googleTicker ?? g,
@@ -402,7 +402,7 @@ export async function autoMatchSupports(
   const force = Boolean(options.force)
   const onProgress = options.onProgress
 
-  let list = supports ?? (await db.supports.toArray())
+  let list = supports ?? (await listFlatSupports())
   if (!force) {
     list = list.filter((s) => !s.yahooTicker)
   }
@@ -425,7 +425,7 @@ export async function autoMatchSupports(
     results.push(r)
     if (r.ticker && (force || r.source !== 'existing')) {
       const g = googleTickerFromYahoo(r.ticker)
-      await db.supports.put({
+      await putFlatSupport({
         ...s,
         yahooTicker: r.ticker,
         googleTicker: force ? g : (s.googleTicker ?? g),
@@ -433,8 +433,7 @@ export async function autoMatchSupports(
       updated++
     } else if (!r.ticker) {
       if (force) {
-        // Keep previous ticker if rematch found nothing? Clear to show failure.
-        await db.supports.put({
+        await putFlatSupport({
           ...s,
           yahooTicker: undefined,
           googleTicker: undefined,
@@ -456,7 +455,7 @@ export async function autoMatchSupports(
 export async function resetSupportTickers(supports: Support[]): Promise<number> {
   let n = 0
   for (const s of supports) {
-    await db.supports.put({
+    await putFlatSupport({
       ...s,
       yahooTicker: undefined,
       googleTicker: undefined,

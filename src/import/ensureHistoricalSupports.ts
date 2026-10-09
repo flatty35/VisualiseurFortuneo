@@ -1,5 +1,7 @@
 import type { Operation, Support } from '@/domain/types'
-import { db } from '@/persist/db'
+import { AssetType } from '@/domain/portfolioModel'
+import { projectPortfolio } from '@/domain/flatAdapters'
+import { loadPortfolio, savePortfolio } from '@/persist/portfolioStore'
 import {
   assignSupportKeys,
   buildNameToIsin,
@@ -31,11 +33,11 @@ export async function ensureHistoricalSupports(): Promise<HistoricalSupportsRepo
 }
 
 async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport> {
-  const [ops, supports, openings] = await Promise.all([
-    db.operations.toArray(),
-    db.supports.toArray(),
-    db.virtualOpenings.toArray(),
-  ])
+  const portfolio = await loadPortfolio()
+  const projected = projectPortfolio(portfolio)
+  const ops = projected.operations
+  const supports = projected.supports
+  const openings = projected.virtualOpenings
 
   const supportMap = new Map(supports.map((s) => [s.isin, s]))
   const positions = openings.flatMap((vo) =>
@@ -46,7 +48,6 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     })),
   )
 
-  // Prefer real ISINs already known on supports / VO / ops
   const nameToIsin = buildNameToIsin(positions, ops)
   for (const s of supports) {
     if (!isLocalSupportId(s.isin)) {
@@ -56,9 +57,8 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
 
   const keyed = assignSupportKeys(ops, nameToIsin)
 
-  // Migrate LOCAL:* → real ISIN when a name match appears later
   let migratedToRealIsin = 0
-  const remap = new Map<string, string>() // oldIsin → newIsin
+  const remap = new Map<string, string>()
   for (const o of keyed) {
     if (!o.isin || !o.name) continue
     if (!isLocalSupportId(o.isin)) continue
@@ -73,8 +73,6 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
       migratedToRealIsin++
       return { ...o, isin: remap.get(o.isin)! }
     }
-    // Also: op already LOCAL but name now resolves — assignSupportKeys
-    // only fills missing; upgrade LOCAL when real is known
     if (o.isin && isLocalSupportId(o.isin) && o.name) {
       const real = nameToIsin.get(normalizeName(o.name))
       if (real && !isLocalSupportId(real)) {
@@ -87,19 +85,29 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
   })
 
   let opsUpdated = 0
-  const toPut: Operation[] = []
   for (let i = 0; i < ops.length; i++) {
     const before = ops[i]
     const after = finalOps[i]
-    if (before.isin !== after.isin) {
-      toPut.push(after)
-      opsUpdated++
+    if (before.isin === after.isin) continue
+    opsUpdated++
+    // Update domain op customDetails + supportUniqueID
+    for (const env of portfolio.envelopes) {
+      const dop = env.operations.find((x) => x.id === before.id)
+      if (!dop) continue
+      const key = after.isin!
+      const s = portfolio.upsertSupport({
+        niceUniqueName: after.name ?? key,
+        ISIN: key.startsWith('LOCAL:') ? '' : key,
+        localKey: key.startsWith('LOCAL:') ? key : '',
+        assetType: AssetType.ACTIONS,
+      })
+      dop.supportUniqueID = s.uniqueID
+      dop.customDetails = { ...dop.customDetails, isin: key, name: after.name }
     }
   }
-  if (toPut.length) await db.operations.bulkPut(toPut)
 
-  // Upsert supports for every distinct isin on ops + migrate LOCAL shells
   let supportsCreated = 0
+  const beforeCount = Object.keys(portfolio.supports).length
   const seen = new Set<string>()
   for (const o of finalOps) {
     if (!o.isin || !o.name) continue
@@ -107,82 +115,81 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     seen.add(o.isin)
     const cur = supportMap.get(o.isin)
     if (!cur) {
-      // If we migrated away from a LOCAL id, reuse ticker from the old row
-      let yahooTicker: string | undefined
-      let googleTicker: string | undefined
-      let boursoramaTicker: string | undefined
-      let manualPrices: Support['manualPrices'] = []
-      let staticPrice: number | undefined
+      let yahooTicker = ''
+      let googleTicker = ''
+      let boursoramaTicker = ''
+      let staticDatedValues: Array<[number, number]> = []
+      let lastKnown: [number, number] = [0, 0]
       for (const [from, to] of remap) {
         if (to !== o.isin) continue
-        const old = supportMap.get(from)
+        const old = portfolio.findSupportByKey(from)
         if (old) {
-          yahooTicker = old.yahooTicker
-          googleTicker = old.googleTicker
+          yahooTicker = old.yahooFinanceTicker
+          googleTicker = old.googleFinanceTicker
           boursoramaTicker = old.boursoramaTicker
-          manualPrices = old.manualPrices
-          staticPrice = old.staticPrice
+          staticDatedValues = old.staticDatedValues
+          lastKnown = old.lastKnownValue
         }
       }
-      const created: Support = {
-        isin: o.isin,
-        name: o.name,
-        yahooTicker,
-        googleTicker,
-        boursoramaTicker,
-        manualPrices,
-        staticPrice,
-      }
-      supportMap.set(o.isin, created)
-      await db.supports.put(created)
-      supportsCreated++
+      portfolio.upsertSupport({
+        niceUniqueName: o.name,
+        ISIN: o.isin.startsWith('LOCAL:') ? '' : o.isin,
+        localKey: o.isin.startsWith('LOCAL:') ? o.isin : '',
+        assetType: AssetType.ACTIONS,
+        yahooFinanceTicker: yahooTicker,
+        googleFinanceTicker: googleTicker,
+        boursoramaTicker: boursoramaTicker,
+        staticDatedValues,
+        lastKnownValue: lastKnown,
+      })
     } else if (o.name && cur.name !== o.name && isLocalSupportId(cur.isin)) {
-      // keep clearer name from ops
-      const updated = { ...cur, name: o.name }
-      supportMap.set(o.isin, updated)
-      await db.supports.put(updated)
+      const s = portfolio.findSupportByKey(o.isin)
+      if (s) s.niceUniqueName = o.name
     }
   }
 
-  // Also ensure a LOCAL support exists for every unique trade name
-  // (covers names only seen on dividends etc. after keying)
   for (const o of finalOps) {
     if (!o.name || o.isin) continue
     const id = localSupportId(o.name)
-    if (supportMap.has(id)) continue
-    const created: Support = {
-      isin: id,
-      name: o.name,
-      manualPrices: [],
-    }
-    supportMap.set(id, created)
-    await db.supports.put(created)
-    supportsCreated++
+    if (supportMap.has(id) || portfolio.findSupportByKey(id)) continue
+    portfolio.upsertSupport({
+      niceUniqueName: o.name,
+      localKey: id,
+      assetType: AssetType.ACTIONS,
+    })
   }
 
-  // Drop orphan LOCAL supports that were fully migrated
   for (const [from, to] of remap) {
     if (from === to) continue
-    const old = supportMap.get(from)
-    const neu = supportMap.get(to)
+    const old = portfolio.findSupportByKey(from)
+    const neu = portfolio.findSupportByKey(to)
     if (old && neu) {
-      // merge tickers into real ISIN if missing
-      const merged: Support = {
-        ...neu,
-        yahooTicker: neu.yahooTicker ?? old.yahooTicker,
-        googleTicker: neu.googleTicker ?? old.googleTicker,
-        boursoramaTicker: neu.boursoramaTicker ?? old.boursoramaTicker,
-        staticPrice: neu.staticPrice ?? old.staticPrice,
-        manualPrices:
-          neu.manualPrices.length > 0 ? neu.manualPrices : old.manualPrices,
+      if (!neu.yahooFinanceTicker) neu.yahooFinanceTicker = old.yahooFinanceTicker
+      if (!neu.googleFinanceTicker)
+        neu.googleFinanceTicker = old.googleFinanceTicker
+      if (!neu.boursoramaTicker) neu.boursoramaTicker = old.boursoramaTicker
+      if (!neu.staticDatedValues.length)
+        neu.staticDatedValues = old.staticDatedValues
+      // Remap ops still pointing at old support
+      for (const env of portfolio.envelopes) {
+        for (const op of env.operations) {
+          if (op.supportUniqueID === old.uniqueID) {
+            op.supportUniqueID = neu.uniqueID
+          }
+        }
       }
-      await db.supports.put(merged)
-      await db.supports.delete(from)
+      delete portfolio.supports[old.uniqueID]
       supportMap.delete(from)
     }
   }
 
-  await applySeedMatches([...supportMap.values()])
+  supportsCreated = Math.max(
+    0,
+    Object.keys(portfolio.supports).length - beforeCount,
+  )
+
+  await savePortfolio(portfolio)
+  await applySeedMatches(projectPortfolio(portfolio).supports)
 
   return { opsUpdated, supportsCreated, migratedToRealIsin }
 }

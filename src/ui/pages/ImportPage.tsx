@@ -7,7 +7,7 @@ import { mergeImport } from '@/import/merge'
 import { autoResolveLocalIsins } from '@/quotes/isinSearch'
 import { autoMatchSupports } from '@/quotes/tickerMatch'
 import { isProxyConfigured } from '@/quotes/gasClient'
-import { db } from '@/persist/db'
+import { listFlatSupports } from '@/persist/portfolioStore'
 
 const ENVELOPES: { value: EnvelopeType; label: string }[] = [
   { value: 'PEA', label: 'PEA' },
@@ -86,7 +86,7 @@ export default function ImportPage() {
       setProgressPct(65)
       setProgress('Association des tickers Yahoo (peut prendre 1–2 min)…')
 
-      const pending = (await db.supports.toArray()).filter((s) => !s.yahooTicker)
+      const pending = (await listFlatSupports()).filter((s) => !s.yahooTicker)
       if (pending.length === 0) {
         r.warnings.push('Tous les supports ont déjà un ticker.')
       } else if (!isProxyConfigured()) {

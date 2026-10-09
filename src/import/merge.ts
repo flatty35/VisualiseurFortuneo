@@ -3,12 +3,18 @@ import type {
   ImportReport,
   Operation,
   ParsedPosition,
-  Support,
 } from '@/domain/types'
-import { db, ensureEnvelope } from '@/persist/db'
+import { AssetType } from '@/domain/portfolioModel'
+import {
+  applyVirtualOpeningSeeds,
+  envelopeTypeToKind,
+  mergeFlatOpsIntoPortfolio,
+  projectPortfolio,
+} from '@/domain/flatAdapters'
+import { ensureEnvelope } from '@/persist/db'
+import { loadPortfolio, savePortfolio } from '@/persist/portfolioStore'
 import {
   reconstructVirtualOpening,
-  seedsFromVirtualOpening,
 } from './reconstructBackward'
 import { extractCashFromPositions } from './positionsXls'
 import { assignSupportKeys, buildNameToIsin } from './resolveIsin'
@@ -28,8 +34,6 @@ export async function mergeImport(input: {
   await ensureEnvelope(envelope)
 
   const nameToIsin = buildNameToIsin(positions, input.titresOps)
-  // Real ISIN from positions when possible, else LOCAL:{libellé} so sold /
-  // historical titles stay visible (FortuneoPEAViewer keyed by name).
   const titresOps = assignSupportKeys(input.titresOps, nameToIsin)
   const localKeyed = titresOps.filter(
     (o) =>
@@ -45,79 +49,77 @@ export async function mergeImport(input: {
     )
   }
 
-  // Espèces = full cash ledger; titres = quantities (cashImpact ignores ISIN rows)
   const especesOps = input.especesOps
   const incoming = [...titresOps, ...especesOps]
-  const existing = await db.operations.where('envelope').equals(envelope).toArray()
-  const existingFp = new Set(existing.map((o) => o.fingerprint))
 
-  // Drop previous synthetic seeds for this envelope before recompute
-  const syntheticIds = existing.filter((o) => o.synthetic).map((o) => o.id)
-  if (syntheticIds.length) {
-    await db.operations.bulkDelete(syntheticIds)
-  }
+  const portfolio = await loadPortfolio()
+  const env = portfolio.getOrCreateEnvelope(envelopeTypeToKind(envelope))
 
+  // Drop previous synthetic seeds before recompute
+  env.operations = env.operations.filter((o) => !o.synthetic)
+
+  const existingFp = new Set(env.operations.map((o) => o.fingerprint))
   const fresh = incoming.filter((o) => !existingFp.has(o.fingerprint))
   const skippedDuplicates = incoming.length - fresh.length
 
-  if (fresh.length) {
-    await db.operations.bulkPut(fresh)
-  }
+  mergeFlatOpsIntoPortfolio(portfolio, envelope, fresh)
 
-  const allOps = await db.operations
-    .where('envelope')
-    .equals(envelope)
-    .filter((o) => !o.synthetic)
-    .toArray()
+  const projected = projectPortfolio(portfolio)
+  const allOps = projected.operations.filter(
+    (o) => o.envelope === envelope && !o.synthetic,
+  )
 
-  // Upsert supports from positions + ops
   let supportsCreated = 0
-  const supportMap = new Map<string, Support>()
-  for (const s of await db.supports.toArray()) {
-    supportMap.set(s.isin, s)
-  }
-
-  const upsertSupport = async (isin: string, name: string, price?: number) => {
-    const cur = supportMap.get(isin)
-    if (!cur) {
-      const created: Support = {
-        isin,
-        name,
-        manualPrices: [],
-        staticPrice: price,
-      }
-      supportMap.set(isin, created)
-      await db.supports.put(created)
-      supportsCreated++
-    } else if (name && cur.name !== name) {
-      const updated = { ...cur, name }
-      supportMap.set(isin, updated)
-      await db.supports.put(updated)
-    } else if (price !== undefined && cur.staticPrice === undefined) {
-      const updated = { ...cur, staticPrice: price }
-      supportMap.set(isin, updated)
-      await db.supports.put(updated)
-    }
-  }
+  const beforeSupports = Object.keys(portfolio.supports).length
 
   for (const p of positions) {
     if (!p.isin || p.isin === 'CASH' || p.isin === 'EUR') continue
     const n = p.name.toLowerCase()
     if (n.includes('espec') || n.includes('liquidit')) continue
-    await upsertSupport(p.isin, p.name, p.price ?? p.pru)
+    portfolio.upsertSupport({
+      niceUniqueName: p.name,
+      ISIN: p.isin.startsWith('LOCAL:') ? '' : p.isin,
+      localKey: p.isin.startsWith('LOCAL:') ? p.isin : '',
+      assetType: AssetType.ACTIONS,
+      lastKnownValue:
+        p.price !== undefined || p.pru !== undefined
+          ? ([0, p.price ?? p.pru ?? 0] as [number, number])
+          : undefined,
+      staticDatedValues:
+        p.price !== undefined || p.pru !== undefined
+          ? [[0, p.price ?? p.pru ?? 0]]
+          : undefined,
+    })
   }
   for (const o of allOps) {
-    if (o.isin) await upsertSupport(o.isin, o.name ?? o.isin, o.price)
+    if (!o.isin) continue
+    portfolio.upsertSupport({
+      niceUniqueName: o.name ?? o.isin,
+      ISIN: o.isin.startsWith('LOCAL:') ? '' : o.isin,
+      localKey: o.isin.startsWith('LOCAL:') ? o.isin : '',
+      assetType: AssetType.ACTIONS,
+    })
   }
+  supportsCreated = Math.max(
+    0,
+    Object.keys(portfolio.supports).length - beforeSupports,
+  )
 
-  // Fast local seed only during import (Yahoo/OpenFIGI run separately with UI progress)
-  const seeded = await applySeedMatches([...supportMap.values()])
+  await savePortfolio(portfolio)
+
+  const flatSupports = projectPortfolio(portfolio).supports
+  const seeded = await applySeedMatches(flatSupports)
   if (seeded) {
     warnings.push(`${seeded} ticker(s) associés via table locale.`)
   }
 
+  // Reload after seed matches (applySeedMatches writes via portfolio store)
+  let portfolio2 = await loadPortfolio()
+
   if (positions.length === 0) {
-    warnings.push('Aucune position ouverte fournie — reconstruction virtuelle impossible.')
+    warnings.push(
+      'Aucune position ouverte fournie — reconstruction virtuelle impossible.',
+    )
     const hist = await ensureHistoricalSupports()
     supportsCreated += hist.supportsCreated
     return {
@@ -139,10 +141,14 @@ export async function mergeImport(input: {
     )
   }
 
+  const opsForReconstruct = projectPortfolio(portfolio2).operations.filter(
+    (o) => o.envelope === envelope && !o.synthetic,
+  )
+
   const virtualOpening = reconstructVirtualOpening({
     envelope,
     positions,
-    operations: allOps,
+    operations: opsForReconstruct,
     currentCash,
   })
 
@@ -152,12 +158,10 @@ export async function mergeImport(input: {
     )
   }
 
-  const seeds = seedsFromVirtualOpening(virtualOpening)
-  await db.operations.bulkPut(seeds)
-  await db.virtualOpenings.put(virtualOpening)
+  applyVirtualOpeningSeeds(portfolio2, virtualOpening)
+  await savePortfolio(portfolio2)
   await ensureEnvelope(envelope)
 
-  // Backfill any pre-existing ops still missing keys (re-import / upgrades)
   const hist = await ensureHistoricalSupports()
   supportsCreated += hist.supportsCreated
   if (hist.opsUpdated) {
@@ -166,7 +170,8 @@ export async function mergeImport(input: {
     )
   }
 
-  const unmapped = (await db.supports.toArray()).filter(
+  portfolio2 = await loadPortfolio()
+  const unmapped = projectPortfolio(portfolio2).supports.filter(
     (s) => !s.yahooTicker && s.staticPrice === undefined,
   )
   if (unmapped.length) {

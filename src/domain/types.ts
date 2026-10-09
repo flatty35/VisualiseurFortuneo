@@ -1,3 +1,5 @@
+import type { PortfolioData } from './portfolioModel'
+
 /** Envelope types supported in v1 */
 export type EnvelopeType = 'PEA' | 'PEA_PME' | 'CTO'
 
@@ -26,7 +28,10 @@ export interface ManualPrice {
 }
 
 export interface Support {
+  /** Primary key for engines: real ISIN, LOCAL:…, or ID:n */
   isin: string
+  /** Portfolio Support.uniqueID when persisted in schema v2+ */
+  uniqueID?: number
   name: string
   yahooTicker?: string
   googleTicker?: string
@@ -95,19 +100,23 @@ export interface UiPrefs {
 
 export type ChartPeriod = '1M' | '3M' | '1Y' | '3Y' | '10Y' | 'MAX'
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const APP_NAME = 'VisualiseurFortuneo'
 
+/** Schema v2 export = Portfolio.toJSON() (+ optional quotes). v1 still importable. */
 export interface ExportBundle {
   meta: {
     app: typeof APP_NAME
     schemaVersion: number
     date: string
   }
-  envelopes: EnvelopeMeta[]
-  operations: Operation[]
-  supports: Support[]
-  virtualOpenings: VirtualOpening[]
+  /** v2 primary payload */
+  portfolio?: PortfolioData
+  /** v1 legacy fields (import migrates to portfolio) */
+  envelopes?: EnvelopeMeta[]
+  operations?: Operation[]
+  supports?: Support[]
+  virtualOpenings?: VirtualOpening[]
   quoteCache?: QuoteSeries[]
   uiPrefs?: UiPrefs
 }

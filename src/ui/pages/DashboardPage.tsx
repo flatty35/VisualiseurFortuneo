@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import type { EnvelopeType } from '@/domain/types'
-import { db } from '@/persist/db'
+import { loadProjected } from '@/persist/portfolioStore'
 import { buildHoldingsSeries } from '@/engine/positions'
 import { valueHoldingsSeries } from '@/engine/valuation'
 import { getAllQuoteMaps } from '@/quotes/localQuoteCache'
@@ -15,18 +15,13 @@ function fmtEur(n: number): string {
 
 export default function DashboardPage() {
   const { data, loading } = useAsyncData(async () => {
-    const [envelopes, operations, supports, openings, quotes] = await Promise.all([
-      db.envelopes.toArray(),
-      db.operations.toArray(),
-      db.supports.toArray(),
-      db.virtualOpenings.toArray(),
-      getAllQuoteMaps(),
-    ])
+    const [{ envelopes, operations, supports, virtualOpenings }, quotes] =
+      await Promise.all([loadProjected(), getAllQuoteMaps()])
 
     const cards = ENVELOPES.map((type) => {
       const meta = envelopes.find((e) => e.type === type)
       const ops = operations.filter((o) => o.envelope === type)
-      const vo = openings.find((o) => o.envelope === type) ?? null
+      const vo = virtualOpenings.find((o) => o.envelope === type) ?? null
       if (!ops.length && !vo) {
         return { type, empty: true as const }
       }

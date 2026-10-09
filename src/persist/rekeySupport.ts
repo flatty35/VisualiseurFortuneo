@@ -1,6 +1,7 @@
 import type { Support } from '@/domain/types'
+import { AssetType, GetterType } from '@/domain/portfolioModel'
 import { isLocalSupportId } from '@/import/resolveIsin'
-import { db } from './db'
+import { loadPortfolio, savePortfolio } from './portfolioStore'
 
 export function isValidIsin(isin: string): boolean {
   return /^[A-Z]{2}[A-Z0-9]{10}$/.test(isin.trim().toUpperCase())
@@ -9,7 +10,6 @@ export function isValidIsin(isin: string): boolean {
 export function normalizeSupportKey(raw: string): string {
   const t = raw.trim()
   if (isLocalSupportId(t)) {
-    // Keep LOCAL: slug as-is (lowercase slug already)
     const slug = t.slice('LOCAL:'.length).trim().toLowerCase()
     return `LOCAL:${slug}`
   }
@@ -26,8 +26,7 @@ export interface RekeyResult {
 
 /**
  * Change a support's primary key (ISIN / LOCAL:…).
- * Updates operations + virtual openings. Merges into an existing support
- * if `to` already exists.
+ * Updates linked operations. Merges into an existing support if `to` exists.
  */
 export async function rekeySupport(
   fromIsin: string,
@@ -39,87 +38,105 @@ export async function rekeySupport(
   if (!from) throw new Error('Clé source vide')
   if (!to) throw new Error('Nouvelle clé vide')
   if (!isLocalSupportId(to) && !isValidIsin(to)) {
-    throw new Error('ISIN invalide (12 caractères, ex. FR0000120073) ou LOCAL:…')
+    throw new Error(
+      'ISIN invalide (12 caractères, ex. FR0000120073) ou LOCAL:…',
+    )
   }
 
+  const portfolio = await loadPortfolio()
+  const source = portfolio.findSupportByKey(from)
+  if (!source) throw new Error(`Support introuvable: ${from}`)
+
   if (from === to) {
-    const cur = await db.supports.get(from)
-    if (!cur) throw new Error(`Support introuvable: ${from}`)
     if (patch) {
-      await db.supports.put({
-        ...cur,
-        ...patch,
-        isin: from,
-        manualPrices: patch.manualPrices ?? cur.manualPrices,
-      })
+      if (patch.name) source.niceUniqueName = patch.name
+      if (patch.yahooTicker !== undefined)
+        source.yahooFinanceTicker = patch.yahooTicker ?? ''
+      if (patch.googleTicker !== undefined)
+        source.googleFinanceTicker = patch.googleTicker ?? ''
+      if (patch.boursoramaTicker !== undefined)
+        source.boursoramaTicker = patch.boursoramaTicker ?? ''
+      if (patch.staticPrice !== undefined) {
+        source.lastKnownValue = [0, patch.staticPrice]
+        source.staticDatedValues = [
+          ...source.staticDatedValues.filter(([ts]) => ts !== 0),
+          [0, patch.staticPrice],
+        ]
+        source.getterType = GetterType.STATIC
+      }
+      if (patch.manualPrices) {
+        source.staticDatedValues = patch.manualPrices.map(
+          (p) =>
+            [Date.parse(`${p.date}T12:00:00Z`) || 0, p.price] as [
+              number,
+              number,
+            ],
+        )
+      }
+      if (patch.yahooTicker) source.getterType = GetterType.YAHOO_FINANCE
     }
+    await savePortfolio(portfolio)
     return { from, to, opsUpdated: 0, voUpdated: 0, mergedIntoExisting: false }
   }
 
-  const source = await db.supports.get(from)
-  if (!source) throw new Error(`Support introuvable: ${from}`)
+  const existingTarget = portfolio.findSupportByKey(to)
+  const isLocal = to.startsWith('LOCAL:')
 
-  const existingTarget = await db.supports.get(to)
-  const merged: Support = {
-    isin: to,
-    name: patch?.name ?? existingTarget?.name ?? source.name,
-    yahooTicker:
-      patch?.yahooTicker ?? existingTarget?.yahooTicker ?? source.yahooTicker,
-    googleTicker:
-      patch?.googleTicker ?? existingTarget?.googleTicker ?? source.googleTicker,
-    boursoramaTicker:
-      patch?.boursoramaTicker ??
-      existingTarget?.boursoramaTicker ??
-      source.boursoramaTicker,
-    staticPrice:
-      patch?.staticPrice ?? existingTarget?.staticPrice ?? source.staticPrice,
-    manualPrices:
-      patch?.manualPrices ??
-      (existingTarget?.manualPrices?.length
-        ? existingTarget.manualPrices
-        : source.manualPrices),
-  }
-
-  const ops = await db.operations.where('isin').equals(from).toArray()
-  const opsUpdated = ops.length
-  if (ops.length) {
-    await db.operations.bulkPut(ops.map((o) => ({ ...o, isin: to })))
-  }
-
-  let voUpdated = 0
-  const openings = await db.virtualOpenings.toArray()
-  for (const vo of openings) {
-    let changed = false
-    const positions = vo.positions.map((p) => {
-      if (p.isin !== from) return p
-      changed = true
-      return { ...p, isin: to, name: merged.name }
+  let target = existingTarget
+  if (!target) {
+    target = portfolio.upsertSupport({
+      niceUniqueName: patch?.name ?? source.niceUniqueName,
+      ISIN: isLocal ? '' : to,
+      localKey: isLocal ? to : '',
+      assetType: AssetType.ACTIONS,
+      getterType: source.getterType,
+      yahooFinanceTicker:
+        patch?.yahooTicker ?? source.yahooFinanceTicker,
+      googleFinanceTicker:
+        patch?.googleTicker ?? source.googleFinanceTicker,
+      boursoramaTicker:
+        patch?.boursoramaTicker ?? source.boursoramaTicker,
+      staticDatedValues: source.staticDatedValues,
+      lastKnownValue: source.lastKnownValue,
     })
-    // Collapse duplicate isins after remap
-    if (changed) {
-      const byIsin = new Map<string, (typeof positions)[0]>()
-      for (const p of positions) {
-        const prev = byIsin.get(p.isin)
-        if (!prev) byIsin.set(p.isin, p)
-        else {
-          byIsin.set(p.isin, {
-            ...prev,
-            quantity: prev.quantity + p.quantity,
-            name: prev.name || p.name,
-          })
+  } else {
+    target.niceUniqueName =
+      patch?.name ?? (target.niceUniqueName || source.niceUniqueName)
+    if (!target.yahooFinanceTicker)
+      target.yahooFinanceTicker =
+        patch?.yahooTicker ?? source.yahooFinanceTicker
+    if (!target.googleFinanceTicker)
+      target.googleFinanceTicker =
+        patch?.googleTicker ?? source.googleFinanceTicker
+    if (!target.boursoramaTicker)
+      target.boursoramaTicker =
+        patch?.boursoramaTicker ?? source.boursoramaTicker
+    if (!target.staticDatedValues.length)
+      target.staticDatedValues = source.staticDatedValues
+  }
+
+  let opsUpdated = 0
+  let voUpdated = 0
+  for (const env of portfolio.envelopes) {
+    for (const op of env.operations) {
+      if (op.supportUniqueID === source.uniqueID) {
+        op.supportUniqueID = target.uniqueID
+        op.customDetails = {
+          ...op.customDetails,
+          isin: to,
+          name: target.niceUniqueName,
         }
+        opsUpdated++
+        if (op.synthetic) voUpdated++
       }
-      await db.virtualOpenings.put({
-        ...vo,
-        positions: [...byIsin.values()],
-      })
-      voUpdated++
     }
   }
 
-  await db.supports.put(merged)
-  if (from !== to) await db.supports.delete(from)
+  if (source.uniqueID !== target.uniqueID) {
+    delete portfolio.supports[source.uniqueID]
+  }
 
+  await savePortfolio(portfolio)
   return {
     from,
     to,
