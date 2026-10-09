@@ -74,7 +74,13 @@ export interface PriceCompareInput {
   to: string
 }
 
-type Pt = { date: string; value: number; held: boolean }
+type Pt = {
+  date: string
+  value: number
+  held: boolean
+  price?: number
+  valuation?: number
+}
 
 /**
  * Split points into solid (held) / dashed (flat) segments.
@@ -135,6 +141,7 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
       )?.price
     if (!basePx || basePx === 0) return
 
+    // Points from first buy (base 100); shared axisDates pads earlier period days with null.
     const start = buyDate > from ? buyDate : from
     const points: Pt[] = []
     for (const day of days) {
@@ -142,10 +149,13 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
       const px = priceOnDate(day, support, input.quotes)
       if (px === undefined) continue
       const qty = qtyByDay.get(day)?.get(isin) ?? 0
+      const held = Math.abs(qty) > 1e-8
       points.push({
         date: day,
         value: (px / basePx) * 100,
-        held: Math.abs(qty) > 1e-8,
+        held,
+        price: px,
+        valuation: held ? qty * px : 0,
       })
     }
     if (points.length < 1) return
@@ -153,15 +163,14 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
     const color = PALETTE[colorIdx % PALETTE.length]
     const segments = splitHeldSegments(points)
     segments.forEach((seg, segIdx) => {
-      if (seg.points.length < 2 && segments.length > 1) {
-        // allow single-point only if alone
-      }
       if (seg.points.length < 1) return
       out.push({
         id: `${isin}-seg${segIdx}`,
         name,
         dates: seg.points.map((p) => p.date),
         values: seg.points.map((p) => p.value),
+        realPrices: seg.points.map((p) => p.price ?? 0),
+        valuations: seg.points.map((p) => p.valuation ?? 0),
         dashed: !seg.held,
         color,
         showInLegend: segIdx === 0,

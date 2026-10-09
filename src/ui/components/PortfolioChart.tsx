@@ -11,7 +11,7 @@ export interface ChartSeries {
   id: string
   name: string
   dates: string[]
-  values: number[]
+  values: Array<number | null>
   dashed?: boolean
   isPosition?: boolean
   step?: boolean | 'start' | 'middle' | 'end'
@@ -40,6 +40,10 @@ interface Props {
   onPeriod: (p: ChartPeriod) => void
   height?: number
   showPeriodBar?: boolean
+  /** Shared category axis (period window) — keeps valorisation & cours aligned */
+  axisDates?: string[]
+  /** Calendar bounds of the period — zoom null = this full window */
+  periodRange?: ZoomRange | null
   /** Shared zoom (null = full period). */
   zoomRange?: ZoomRange | null
   onZoomRangeChange?: (range: ZoomRange | null) => void
@@ -55,11 +59,15 @@ export default function PortfolioChart({
   onPeriod,
   height = 400,
   showPeriodBar = true,
+  axisDates,
+  periodRange = null,
   zoomRange = null,
   onZoomRangeChange,
 }: Props) {
   const chartRef = useRef<ReactECharts>(null)
   const axisDatesRef = useRef<string[]>([])
+  const periodRangeRef = useRef(periodRange)
+  periodRangeRef.current = periodRange
   const onZoomRef = useRef(onZoomRangeChange)
   onZoomRef.current = onZoomRangeChange
   const zoomRangeRef = useRef(zoomRange)
@@ -68,64 +76,56 @@ export default function PortfolioChart({
   const suppressEmit = useRef(0)
 
   const option = useMemo(() => {
-    const built = buildOption(series, markers, mode, () =>
-      chartRef.current?.getEchartsInstance() ?? null,
+    const built = buildOption(
+      series,
+      markers,
+      mode,
+      () => chartRef.current?.getEchartsInstance() ?? null,
+      axisDates,
     )
     axisDatesRef.current = built.axisDates
-    return built.option
-  }, [series, markers, mode])
+    // Bake current zoom into option so a remount / notMerge refresh shows the right abscissa
+    const z = resolveZoomOnAxis(built.axisDates, zoomRangeRef.current)
+    const dataZoom = (
+      built.option as { dataZoom: Array<Record<string, unknown>> }
+    ).dataZoom.map((dz) => ({
+      ...dz,
+      start: z.start,
+      end: z.end,
+      startValue: z.startValue,
+      endValue: z.endValue,
+    }))
+    return { ...built.option, dataZoom }
+  }, [series, markers, mode, axisDates])
 
-  // Apply shared zoom from the peer chart only (never on every series rebuild + emit)
+  // Remount when the period window changes — ECharts otherwise keeps the first
+  // category abscissa (e.g. 1Y) on the cours chart until a manual zoom.
+  const axisKey =
+    axisDates && axisDates.length > 0
+      ? `${calendarDay(axisDates[0])}_${calendarDay(axisDates[axisDates.length - 1])}_${axisDates.length}`
+      : 'no-axis'
+
+  // Peer zoom sync (same period axis) — force abscissa refresh without remounting
   useEffect(() => {
     const chart = chartRef.current?.getEchartsInstance()
     if (!chart || !axisDatesRef.current.length) return
-
     const dates = axisDatesRef.current
-    const current = readZoomRange(chart, dates)
+    const current = readZoomRange(chart, dates, periodRangeRef.current)
     if (sameZoom(current, zoomRange ?? null)) return
-
     suppressEmit.current += 1
     try {
-      chart.dispatchAction({
-        type: 'dataZoom',
-        ...resolveZoomOnAxis(dates, zoomRange ?? null),
-      })
+      applyZoomToChart(chart, dates, zoomRange ?? null)
     } catch {
-      // chart may be disposing
+      // disposing
     }
-    // ECharts may emit datazoom async — keep suppress for a tick
     const t = window.setTimeout(() => {
       suppressEmit.current = Math.max(0, suppressEmit.current - 1)
-    }, 50)
+    }, 120)
     return () => {
       window.clearTimeout(t)
       suppressEmit.current = Math.max(0, suppressEmit.current - 1)
     }
   }, [zoomRange])
-
-  // After series/option replace (notMerge), re-apply current shared zoom silently
-  useEffect(() => {
-    const chart = chartRef.current?.getEchartsInstance()
-    if (!chart || !zoomRangeRef.current) return
-    const dates = axisDatesRef.current
-    if (!dates.length) return
-    suppressEmit.current += 1
-    try {
-      chart.dispatchAction({
-        type: 'dataZoom',
-        ...resolveZoomOnAxis(dates, zoomRangeRef.current),
-      })
-    } catch {
-      // ignore
-    }
-    const t = window.setTimeout(() => {
-      suppressEmit.current = Math.max(0, suppressEmit.current - 1)
-    }, 50)
-    return () => {
-      window.clearTimeout(t)
-      suppressEmit.current = Math.max(0, suppressEmit.current - 1)
-    }
-  }, [series, markers, mode])
 
   const emitZoomFromChart = () => {
     if (suppressEmit.current > 0) return
@@ -133,7 +133,7 @@ export default function PortfolioChart({
     if (!chart) return
     const dates = axisDatesRef.current
     if (!dates.length) return
-    const next = readZoomRange(chart, dates)
+    const next = readZoomRange(chart, dates, periodRangeRef.current)
     const prev = zoomRangeRef.current
     if (sameZoom(next, prev)) return
     onZoomRef.current?.(next)
@@ -160,25 +160,21 @@ export default function PortfolioChart({
         {onZoomRangeChange ? ' · zoom synchronisé entre les deux graphiques' : ''}
       </p>
       <ReactECharts
+        key={`${mode}-${axisKey}`}
         ref={chartRef}
         option={option}
         style={{ height, width: '100%' }}
         notMerge
+        lazyUpdate={false}
         opts={{ renderer: 'canvas' }}
         onEvents={{
           datazoom: () => emitZoomFromChart(),
           dblclick: () => {
             suppressEmit.current += 1
-            const chart = chartRef.current?.getEchartsInstance()
-            try {
-              chart?.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
-            } catch {
-              // ignore
-            }
             onZoomRef.current?.(null)
             window.setTimeout(() => {
               suppressEmit.current = Math.max(0, suppressEmit.current - 1)
-            }, 50)
+            }, 100)
           },
         }}
       />
@@ -213,20 +209,87 @@ function sameZoom(a: ZoomRange | null, b: ZoomRange | null): boolean {
 function resolveZoomOnAxis(
   dates: string[],
   range: ZoomRange | null,
-): { start: number; end: number } | { startValue: string; endValue: string } {
-  if (!range || !dates.length) return { start: 0, end: 100 }
-  const days = dates.map(calendarDay)
-  let i0 = days.findIndex((d) => d >= range.start)
-  if (i0 < 0) i0 = 0
-  let i1 = dates.length - 1
-  for (let i = days.length - 1; i >= 0; i--) {
-    if (days[i] <= range.end) {
-      i1 = i
-      break
-    }
+): {
+  start: number
+  end: number
+  startValue: string
+  endValue: string
+} {
+  if (!dates.length) {
+    return { start: 0, end: 100, startValue: '', endValue: '' }
   }
-  if (i1 < i0) i1 = i0
-  return { startValue: dates[i0], endValue: dates[i1] }
+  const days = dates.map(calendarDay)
+  let i0 = 0
+  let i1 = dates.length - 1
+  if (range) {
+    const found = days.findIndex((d) => d >= range.start)
+    i0 = found < 0 ? 0 : found
+    i1 = dates.length - 1
+    for (let i = days.length - 1; i >= 0; i--) {
+      if (days[i] <= range.end) {
+        i1 = i
+        break
+      }
+    }
+    if (i1 < i0) i1 = i0
+  }
+  const last = dates.length - 1
+  const start = last === 0 ? 0 : (i0 / last) * 100
+  const end = last === 0 ? 100 : (i1 / last) * 100
+  return {
+    start,
+    end,
+    startValue: dates[i0],
+    endValue: dates[i1],
+  }
+}
+
+/** Apply zoom to inside + slider so the category abscissa refreshes on both charts. */
+function applyZoomToChart(
+  chart: EChartsType,
+  dates: string[],
+  range: ZoomRange | null,
+) {
+  const z = resolveZoomOnAxis(dates, range)
+  chart.setOption(
+    {
+      xAxis: { data: dates },
+      dataZoom: [
+        {
+          start: z.start,
+          end: z.end,
+          startValue: z.startValue,
+          endValue: z.endValue,
+        },
+        {
+          start: z.start,
+          end: z.end,
+          startValue: z.startValue,
+          endValue: z.endValue,
+        },
+      ],
+    },
+    { lazyUpdate: false },
+  )
+  chart.dispatchAction({
+    type: 'dataZoom',
+    dataZoomIndex: 0,
+    start: z.start,
+    end: z.end,
+  })
+  chart.dispatchAction({
+    type: 'dataZoom',
+    dataZoomIndex: 1,
+    start: z.start,
+    end: z.end,
+  })
+  requestAnimationFrame(() => {
+    try {
+      chart.resize()
+    } catch {
+      // ignore
+    }
+  })
 }
 
 function rangeFromDataZoom(
@@ -237,6 +300,7 @@ function rangeFromDataZoom(
     end?: unknown
   },
   dates: string[],
+  periodRange?: ZoomRange | null,
 ): ZoomRange | null {
   if (!dates.length) return null
 
@@ -269,7 +333,13 @@ function rangeFromDataZoom(
 
   if (!start || !end) return null
 
-  // Spans whole axis → treat as reset (avoids null ↔ full-range ping-pong)
+  // Full period (shared) or full local axis → treat as reset
+  const fullStart = calendarDay(periodRange?.start ?? dates[0])
+  const fullEnd = calendarDay(
+    periodRange?.end ?? dates[dates.length - 1],
+  )
+  if (start <= fullStart && end >= fullEnd) return null
+
   const first = calendarDay(dates[0])
   const last = calendarDay(dates[dates.length - 1])
   if (start <= first && end >= last) return null
@@ -280,6 +350,7 @@ function rangeFromDataZoom(
 function readZoomRange(
   chart: EChartsType,
   dates: string[],
+  periodRange?: ZoomRange | null,
 ): ZoomRange | null {
   try {
     const opt = chart.getOption() as {
@@ -294,7 +365,7 @@ function readZoomRange(
     if (!raw) return null
     // getOption may nest dataZoom entries
     const dz = Array.isArray(raw) ? raw[0] : raw
-    return rangeFromDataZoom(dz ?? {}, dates)
+    return rangeFromDataZoom(dz ?? {}, dates, periodRange)
   } catch {
     return null
   }
@@ -305,9 +376,14 @@ function buildOption(
   markers: OperationMarker[],
   mode: 'euro' | 'index',
   getChart: () => EChartsType | null,
+  axisDates?: string[],
 ) {
   const dateSet = new Set<string>()
-  for (const s of series) for (const d of s.dates) dateSet.add(d)
+  if (axisDates?.length) {
+    for (const d of axisDates) dateSet.add(calendarDay(d))
+  } else {
+    for (const s of series) for (const d of s.dates) dateSet.add(calendarDay(d))
+  }
   const dates = [...dateSet].sort()
 
   const markersByDate = new Map<string, OperationMarker[]>()
@@ -328,13 +404,19 @@ function buildOption(
       ? markers
           .filter((m) => m.seriesId === s.id || m.seriesId === s.connectGroup)
           .map((m) => {
-            const idx = s.dates.indexOf(m.date)
-            if (idx < 0) return null
+            const day = calendarDay(m.date)
+            if (!dates.includes(day)) return null
+            const idx = s.dates.findIndex((d) => calendarDay(d) === day)
+            const y =
+              idx >= 0 && s.values[idx] != null
+                ? s.values[idx]!
+                : undefined
+            if (y === undefined) return null
             if (s.showInLegend === false && idx === 0) return null
             const isTrade = m.kind === 'entry' || m.kind === 'exit'
             return {
               name: `${m.type} ${m.date}`,
-              coord: [s.dates[idx], s.values[idx]] as [string, number],
+              coord: [day, y] as [string, number],
               value: m.quantity ?? m.netAmount ?? 0,
               symbol: isTrade ? 'triangle' : 'rect',
               symbolSize: 11,
@@ -359,6 +441,7 @@ function buildOption(
       showSymbol: Boolean(s.step),
       symbolSize: s.step ? 5 : 0,
       smooth: false,
+      connectNulls: false,
       step: s.step ? (s.step === true ? 'end' : s.step) : undefined,
       showLegendSymbol: s.showInLegend !== false,
       lineStyle: {
@@ -367,7 +450,11 @@ function buildOption(
         color: s.color,
       },
       itemStyle: s.color ? { color: s.color } : undefined,
-      data: s.dates.map((d, i) => [d, s.values[i]]),
+      data: dates.map((day) => {
+        const idx = s.dates.findIndex((d) => calendarDay(d) === day)
+        const v = idx >= 0 ? s.values[idx] : null
+        return [day, v]
+      }),
       markPoint: markData.length
         ? {
             animation: false,
@@ -386,12 +473,48 @@ function buildOption(
     ),
   ]
 
-  const formatValue = (v: unknown) => {
-    const n = Array.isArray(v) ? Number(v[1]) : Number(v)
-    if (!Number.isFinite(n)) return '—'
-    return mode === 'index'
-      ? n.toFixed(2)
-      : n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+  const formatEur = (n: number) =>
+    n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+
+  const formatTooltipSeries = (seriesName: string, date: string, raw: unknown) => {
+    const rawY = Array.isArray(raw) ? raw[1] : raw
+    const chartVal = rawY == null || rawY === '' ? NaN : Number(rawY)
+    const day = calendarDay(date)
+    const match = series.find(
+      (s) =>
+        s.name === seriesName &&
+        s.dates.some((d) => calendarDay(d) === day),
+    )
+    const idx =
+      match?.dates.findIndex((d) => calendarDay(d) === day) ?? -1
+    const price =
+      idx >= 0 && match?.realPrices?.[idx] !== undefined
+        ? match.realPrices[idx]
+        : undefined
+    const valo =
+      idx >= 0 && match?.valuations?.[idx] !== undefined
+        ? match.valuations[idx]
+        : undefined
+
+    if (mode === 'index' && (price !== undefined || valo !== undefined)) {
+      const primary =
+        valo !== undefined && valo > 0
+          ? formatEur(valo)
+          : price !== undefined
+            ? formatEur(price)
+            : '—'
+      const secondary = Number.isFinite(chartVal)
+        ? ` · base ${chartVal.toFixed(1)}`
+        : ''
+      const priceHint =
+        valo !== undefined && valo > 0 && price !== undefined
+          ? ` <span style="color:#9bb5a8;font-size:11px">(${formatEur(price)})</span>`
+          : ''
+      return `${primary}${priceHint}<span style="color:#9bb5a8;font-size:11px">${secondary}</span>`
+    }
+
+    if (!Number.isFinite(chartVal)) return '—'
+    return mode === 'index' ? chartVal.toFixed(2) : formatEur(chartVal)
   }
 
   const option = {
@@ -472,7 +595,7 @@ function buildOption(
             `<div style="display:flex;gap:8px;align-items:baseline;margin:2px 0">` +
               `<span>${p.marker || ''}</span>` +
               `<span style="flex:1">${escapeHtml(name)}</span>` +
-              `<span style="font-variant-numeric:tabular-nums">${formatValue(p.value)}</span>` +
+              `<span style="font-variant-numeric:tabular-nums;text-align:right">${formatTooltipSeries(name, date, p.value)}</span>` +
               `</div>`,
           )
         }

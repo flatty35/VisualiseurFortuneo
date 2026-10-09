@@ -29,9 +29,14 @@ export default function ChartsPage() {
   const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null)
   const autoRefreshDone = useRef(false)
 
+  const setPeriodAndResetZoom = (p: ChartPeriod) => {
+    setZoomRange(null)
+    setPeriod(p)
+  }
+
   useEffect(() => {
     setZoomRange(null)
-  }, [period, envelope])
+  }, [envelope])
 
   const onZoomRangeChange = (range: ZoomRange | null) => {
     setZoomRange((prev) => {
@@ -76,6 +81,9 @@ export default function ChartsPage() {
       const allDates = holdings.map((h) => h.date)
       const { from, to } = sliceByPeriod(allDates, period)
       const sliced = holdings.filter((h) => h.date >= from && h.date <= to)
+      /** Shared X axis for valorisation + cours (period window). */
+      const axisDates = sliced.map((h) => h.date)
+      const periodRange = { start: from, end: to }
       const valued = valueHoldingsSeries({
         holdings: sliced,
         supports: data.supports,
@@ -102,11 +110,14 @@ export default function ChartsPage() {
           from: holdings[0]?.date ?? from,
           to: holdings[holdings.length - 1]?.date ?? to,
         })
-        const cashPts = cashFull.filter((p) => p.day >= from && p.day <= to)
+        // EOD only (no ·abo categories) so axis stays aligned with cours
+        const cashPts = cashFull.filter(
+          (p) => !p.isSpike && p.day >= from && p.day <= to,
+        )
         valorisation.push({
           id: 'cash',
           name: 'Espèces',
-          dates: cashPts.map((p) => p.date),
+          dates: cashPts.map((p) => p.day),
           values: cashPts.map((p) => p.cash),
           dashed: true,
           step: 'end',
@@ -185,15 +196,17 @@ export default function ChartsPage() {
           return a.name.localeCompare(b.name, 'fr')
         })
 
-      return {
-        valorisation,
-        priceCompare,
-        markers,
-        isinList,
-        tickersMapped,
-        tickersCached,
-        lastTotal: valued[valued.length - 1]?.total ?? 0,
-      }
+    return {
+      valorisation,
+      priceCompare,
+      markers,
+      isinList,
+      axisDates,
+      periodRange,
+      tickersMapped,
+      tickersCached,
+      lastTotal: valued[valued.length - 1]?.total ?? 0,
+    }
     } catch (e) {
       console.error('Charts model', e)
       return null
@@ -276,7 +289,7 @@ export default function ChartsPage() {
                     key={p}
                     type="button"
                     className={`pill ${period === p ? 'active' : ''}`}
-                    onClick={() => setPeriod(p)}
+                    onClick={() => setPeriodAndResetZoom(p)}
                   >
                     {p === '1Y'
                       ? '1A'
@@ -414,6 +427,8 @@ export default function ChartsPage() {
                 period={period}
                 onPeriod={setPeriod}
                 showPeriodBar={false}
+                axisDates={model.axisDates}
+                periodRange={model.periodRange}
                 zoomRange={zoomRange}
                 onZoomRangeChange={onZoomRangeChange}
                 height={380}
@@ -423,7 +438,7 @@ export default function ChartsPage() {
             <section className="panel charts-panel">
               <div className="charts-panel-head">
                 <h2>Cours</h2>
-                <span className="muted">base 100 · 1er achat</span>
+                <span className="muted">base 100 · zoom sync</span>
               </div>
               {selectedIsins.length === 0 ? (
                 <p className="muted" style={{ margin: '0.5rem 0' }}>
@@ -441,6 +456,8 @@ export default function ChartsPage() {
                   period={period}
                   onPeriod={setPeriod}
                   showPeriodBar={false}
+                  axisDates={model.axisDates}
+                  periodRange={model.periodRange}
                   zoomRange={zoomRange}
                   onZoomRangeChange={onZoomRangeChange}
                   height={380}
