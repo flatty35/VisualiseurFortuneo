@@ -6,9 +6,10 @@ import { parseFrenchDate, parseFrenchNumber, readFileAsLatin1 } from './parseUti
 import { unwrapCsvFile } from './zipExtract'
 
 /**
- * Espèces CSV: keep ONLY external cash flows (versement / retrait).
- * Achat/vente/taxe/dividende lines mirror titres Montant net — including them
- * double-counts cash (classic FortuneoPEAViewer rule).
+ * Espèces CSV = sole cash ledger (Débit / Crédit).
+ * Keep every movement (versements, achats, ventes, taxes, dividendes…).
+ * Titres history drives quantities only — using both for cash double-counts
+ * and drifts when Montant net ≠ espèces lines.
  */
 
 function findHeaderIndex(lines: string[]): number {
@@ -80,21 +81,14 @@ export function parseEspecesText(text: string, envelope: EnvelopeType): Operatio
     if (!date || !label) continue
 
     const type = classifyCashLabel(label)
-    // Ignore trade/tax/dividend mirrors — cash impact comes from titres Montant net
-    if (type !== 'VERSEMENT' && type !== 'RETRAIT') continue
-
     const debit = parseFrenchNumber(pick(row, 'Débit', 'Debit'))
     const credit = parseFrenchNumber(pick(row, 'Crédit', 'Credit'))
 
-    let netAmount: number | undefined
-    if (type === 'VERSEMENT') {
-      netAmount = Math.abs(credit ?? debit ?? 0)
-      if (!netAmount) continue
-    } else {
-      // RETRAIT
-      netAmount = -Math.abs(debit ?? credit ?? 0)
-      if (!netAmount) continue
-    }
+    // Fortuneo: Débit already negative, Crédit positive — sum is the cash delta.
+    let netAmount = 0
+    if (debit !== undefined) netAmount += debit
+    if (credit !== undefined) netAmount += credit
+    if (Math.abs(netAmount) < 1e-9) continue
 
     const fingerprint = operationFingerprint({
       envelope,

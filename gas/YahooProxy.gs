@@ -270,16 +270,19 @@ function quoteMeta_(ticker) {
  */
 function openFigiSearch_(q) {
   q = String(q || '').trim().slice(0, 80);
-  if (q.length < 2) return [];
+  // Strip Yahoo venue suffix so "IBE.MC" searches as "IBE"
+  var bareQ = q.replace(/\.[A-Za-z]{1,4}$/, '');
+  if (bareQ.length < 2) return [];
   var cache = CacheService.getScriptCache();
-  var key = 'figisearch2:' + q.toLowerCase();
+  var key = 'figisearch3:' + bareQ.toLowerCase();
   var hit = cache.get(key);
   if (hit) return JSON.parse(hit);
 
   var bodies = [
-    { query: q, exchCode: 'FP', marketSecDes: 'Equity' },
-    { query: q, marketSecDes: 'Equity' },
-    { query: q },
+    { query: bareQ, exchCode: 'FP', marketSecDes: 'Equity' },
+    { query: bareQ, exchCode: 'SM', marketSecDes: 'Equity' },
+    { query: bareQ, marketSecDes: 'Equity' },
+    { query: bareQ },
   ];
   var seen = {};
   var out = [];
@@ -328,7 +331,7 @@ function isinSearchDetailed_(q) {
   if (q.length < 2) return { results: [], debug: 'query trop courte' };
 
   var cache = CacheService.getScriptCache();
-  var key = 'isinsearch4:' + q.toLowerCase();
+  var key = 'isinsearch5:' + q.toLowerCase();
   var hit = cache.get(key);
   if (hit) {
     try {
@@ -361,43 +364,83 @@ function isinSearchDetailed_(q) {
     out.push(row);
   }
 
-  // 1) Morningstar (best when allowed — often 403 from Apps Script IPs)
-  try {
-    var ms = morningstarIsinSearchUncached_(q);
-    for (var i = 0; i < ms.length; i++) add(ms[i]);
-    dbg.push('morningstar:' + ms.length);
-  } catch (e1) {
-    dbg.push('morningstar:' + String(e1.message || e1));
+  // 0) Direct resolve when q looks like a Yahoo ticker (IBE.MC, AL2SI.PA)
+  var yahooHint = String(q).match(/^([A-Za-z0-9.-]+)\.([A-Za-z]{1,4})$/);
+  if (yahooHint) {
+    try {
+      var direct = boursoramaIsinFromTicker_(yahooHint[1], yahooHint[0]);
+      if (direct.isin) {
+        add({
+          isin: direct.isin,
+          name: direct.name || q,
+          ticker: yahooHint[0].toUpperCase(),
+          figiTicker: yahooHint[1].toUpperCase(),
+          exchange: direct.exchange || '',
+          exchangeCountry: direct.exchangeCountry || '',
+          investmentType: 'EQ',
+          score: 95,
+          source: 'boursorama+yahoo-ticker',
+        });
+        dbg.push('boursorama-direct:' + direct.isin);
+      } else {
+        dbg.push('boursorama-direct:0');
+      }
+    } catch (e0) {
+      dbg.push('boursorama-direct:' + String(e0.message || e0));
+    }
   }
 
-  // 2) OpenFIGI → Boursorama ISIN enrichment for Paris tickers
+  // 1) Morningstar (best when allowed — often 403 from Apps Script IPs)
+  if (out.length === 0) {
+    try {
+      var ms = morningstarIsinSearchUncached_(q);
+      for (var i = 0; i < ms.length; i++) add(ms[i]);
+      dbg.push('morningstar:' + ms.length);
+    } catch (e1) {
+      dbg.push('morningstar:' + String(e1.message || e1));
+    }
+  }
+
+  // 2) OpenFIGI → Boursorama (Paris, Madrid, Amsterdam, …)
   if (out.length === 0) {
     try {
       var figi = openFigiSearch_(q);
       dbg.push('openfigi:' + figi.length);
       var enriched = 0;
-      for (var f = 0; f < figi.length && out.length < 12; f++) {
-        var row = figi[f];
+      // Prefer EU equity venues first
+      var ordered = figi.slice().sort(function (a, b) {
+        function pr(x) {
+          var e = String(x.exchCode || '').toUpperCase();
+          var t = String(x.ticker || '');
+          if (e === 'FP' || e === 'PAR' || t.indexOf('.PA') > 0) return 0;
+          if (e === 'SM' || e === 'MC' || t.indexOf('.MC') > 0) return 1;
+          if (e === 'NA' || e === 'AS' || t.indexOf('.AS') > 0) return 2;
+          if (e === 'GY' || e === 'GF' || t.indexOf('.DE') > 0) return 3;
+          return 9;
+        }
+        return pr(a) - pr(b);
+      });
+      for (var f = 0; f < ordered.length && out.length < 12; f++) {
+        var row = ordered[f];
         var bare = String(row.figiTicker || row.ticker || '')
           .replace(/\.[A-Z]{1,4}$/i, '')
           .toUpperCase();
         if (!bare || bare.indexOf('=') >= 0) continue;
-        var prefer = String(row.ticker).indexOf('.PA') > 0 ||
-          row.exchCode === 'FP' || row.exchCode === 'PAR';
-        // Always try Paris first; still try others if nothing yet
-        if (!prefer && out.length > 0) continue;
-        var resolved = boursoramaIsinFromTicker_(bare);
+        var yahooT = String(row.ticker).indexOf('.') > 0
+          ? row.ticker
+          : figiToYahoo_(bare, row.exchCode);
+        var resolved = boursoramaIsinFromTicker_(bare, yahooT || row.exchCode);
         if (resolved.isin) {
           enriched++;
           add({
             isin: resolved.isin,
             name: resolved.name || row.name || q,
-            ticker: String(row.ticker).indexOf('.') > 0 ? row.ticker : bare + '.PA',
+            ticker: yahooT,
             figiTicker: bare,
-            exchange: 'XPAR',
-            exchangeCountry: 'FRA',
+            exchange: resolved.exchange || row.exchCode || '',
+            exchangeCountry: resolved.exchangeCountry || '',
             investmentType: 'EQ',
-            score: prefer ? 90 : 50,
+            score: 70,
             source: 'boursorama+openfigi',
           });
         }
@@ -408,22 +451,23 @@ function isinSearchDetailed_(q) {
     }
   }
 
-  // 3) Boursorama search by label
+  // 3) Boursorama search by label (all venues, not only 1rP)
   if (out.length === 0) {
     try {
       var symbols = boursoramaSearchSymbols_(q);
       dbg.push('boursorama-search:' + symbols.length);
       for (var s = 0; s < symbols.length && out.length < 10; s++) {
-        var sym = symbols[s];
-        var r2 = boursoramaIsinFromTicker_(sym);
+        var symPath = symbols[s]; // e.g. FF55-IBE or 1rPAL2SI or IBE
+        var r2 = boursoramaIsinFromPath_(symPath);
         if (r2.isin) {
+          var bare2 = String(symPath).replace(/^1rP/i, '').replace(/^FF55-/i, '');
           add({
             isin: r2.isin,
             name: r2.name || q,
-            ticker: sym + '.PA',
-            figiTicker: sym,
-            exchange: 'XPAR',
-            exchangeCountry: 'FRA',
+            ticker: r2.yahooTicker || bare2,
+            figiTicker: bare2,
+            exchange: r2.exchange || '',
+            exchangeCountry: r2.exchangeCountry || '',
             investmentType: 'EQ',
             score: 80,
             source: 'boursorama',
@@ -521,16 +565,51 @@ function morningstarIsinSearchUncached_(q) {
   return out;
 }
 
-/** Parse ISIN from Boursorama quote page for a Euronext Paris symbol (e.g. AL2SI). */
-function boursoramaIsinFromTicker_(bareTicker) {
+/**
+ * Candidate Boursorama /cours/ paths for a ticker.
+ * Paris = 1rP…, Madrid/Sibe = FF55-… or bare, etc.
+ */
+function boursoramaPathsFor_(bareTicker, hint) {
   bareTicker = String(bareTicker || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  if (!bareTicker) return {};
+  if (!bareTicker) return [];
+  var h = String(hint || '').toUpperCase();
+  var paths = [];
+  function push(p) {
+    if (p && paths.indexOf(p) < 0) paths.push(p);
+  }
+  // Order by venue hint
+  if (/\.MC\b|\bSM\b|\bXMAD\b|\bSIBE\b/.test(h)) {
+    push('FF55-' + bareTicker);
+    push(bareTicker);
+    push('1rP' + bareTicker);
+  } else if (/\.PA\b|\bFP\b|\bPAR\b|\bXPAR\b/.test(h)) {
+    push('1rP' + bareTicker);
+    push(bareTicker);
+    push('FF55-' + bareTicker);
+  } else if (/\.AS\b|\bNA\b|\bXAMS\b/.test(h)) {
+    push(bareTicker);
+    push('1rP' + bareTicker);
+  } else if (/\.DE\b|\bGY\b|\bGF\b|\bXETR\b/.test(h)) {
+    push(bareTicker);
+    push('1z' + bareTicker);
+  } else {
+    // Unknown: try common EU patterns
+    push('1rP' + bareTicker);
+    push('FF55-' + bareTicker);
+    push(bareTicker);
+  }
+  return paths;
+}
+
+function boursoramaIsinFromPath_(path) {
+  path = String(path || '').replace(/^\/+|\/+$/g, '');
+  if (!path) return {};
   var cache = CacheService.getScriptCache();
-  var key = 'brsisin:' + bareTicker;
+  var key = 'brspath:' + path;
   var hit = cache.get(key);
   if (hit) return JSON.parse(hit);
 
-  var url = 'https://www.boursorama.com/cours/1rP' + bareTicker + '/';
+  var url = 'https://www.boursorama.com/cours/' + path + '/';
   var resp = UrlFetchApp.fetch(url, {
     muteHttpExceptions: true,
     followRedirects: true,
@@ -544,26 +623,61 @@ function boursoramaIsinFromTicker_(bareTicker) {
     return {};
   }
   var html = resp.getContentText() || '';
+  // Empty / soft "error" shell pages
+  if (html.length < 50000 && !/c-faceplate__isin/i.test(html)) return {};
+
   var isin = '';
   var m = html.match(/c-faceplate__isin[^>]*>\s*([A-Z]{2}[A-Z0-9]{10})\b/i);
   if (m) isin = m[1].toUpperCase();
   if (!isin) {
-    m = html.match(/\b(FR[A-Z0-9]{10})\b/);
+    m = html.match(/\b([A-Z]{2}[A-Z0-9]{10})\b/);
     if (m) isin = m[1].toUpperCase();
   }
+  if (!isin || !/^[A-Z]{2}[A-Z0-9]{10}$/.test(isin)) return {};
+
   var name = '';
   var nm = html.match(/c-faceplate__company-name[^>]*>\s*([^<]+)/i) ||
     html.match(/<title>\s*([^|<]+)/i);
   if (nm) name = nm[1].replace(/\s+/g, ' ').trim();
 
-  var out = { isin: isin, name: name, exchange: 'XPAR', ticker: bareTicker };
-  if (isin) {
-    try { cache.put(key, JSON.stringify(out), 86400); } catch (e) {}
+  var exchange = '';
+  var exchangeCountry = '';
+  var yahooTicker = '';
+  if (/^1rP/i.test(path)) {
+    exchange = 'XPAR'; exchangeCountry = 'FRA';
+    yahooTicker = path.replace(/^1rP/i, '') + '.PA';
+  } else if (/^FF55-/i.test(path) || /Sibe/i.test(html)) {
+    exchange = 'XMAD'; exchangeCountry = 'ESP';
+    yahooTicker = path.replace(/^FF55-/i, '') + '.MC';
+  } else if (/XETRA/i.test(html)) {
+    exchange = 'XETR'; exchangeCountry = 'DEU';
   }
+
+  var out = {
+    isin: isin,
+    name: name,
+    exchange: exchange,
+    exchangeCountry: exchangeCountry,
+    yahooTicker: yahooTicker,
+    path: path,
+  };
+  try { cache.put(key, JSON.stringify(out), 86400); } catch (e) {}
   return out;
 }
 
-/** Boursorama ajax search → list of Paris symbols (AL2SI, …). */
+/** Parse ISIN from Boursorama for a bare ticker (+ optional Yahoo/exch hint). */
+function boursoramaIsinFromTicker_(bareTicker, hint) {
+  bareTicker = String(bareTicker || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (!bareTicker) return {};
+  var paths = boursoramaPathsFor_(bareTicker, hint);
+  for (var i = 0; i < paths.length; i++) {
+    var got = boursoramaIsinFromPath_(paths[i]);
+    if (got.isin) return got;
+  }
+  return {};
+}
+
+/** Boursorama ajax search → /cours/ path segments (1rPAL2SI, FF55-IBE, IBE, …). */
 function boursoramaSearchSymbols_(q) {
   q = String(q || '').trim().slice(0, 80);
   if (q.length < 2) return [];
@@ -578,13 +692,15 @@ function boursoramaSearchSymbols_(q) {
   });
   if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return [];
   var html = resp.getContentText() || '';
-  var re = /\/cours\/1rP([A-Za-z0-9]+)\//g;
+  var re = /\/cours\/([A-Za-z0-9._-]+)\//g;
   var seen = {};
   var out = [];
   var m;
-  while ((m = re.exec(html)) !== null && out.length < 8) {
-    var sym = String(m[1]).toUpperCase();
+  while ((m = re.exec(html)) !== null && out.length < 12) {
+    var sym = String(m[1]);
     if (seen[sym]) continue;
+    // skip junk
+    if (/^(actualite|bourse|fonds)$/i.test(sym)) continue;
     seen[sym] = true;
     out.push(sym);
   }

@@ -52,7 +52,11 @@ export function classifyCashLabel(label: string): OperationType {
   if (lib.includes('dividende') || lib.includes('coupon') || lib.includes('encaissement')) {
     return 'DIVIDENDE'
   }
-  if (lib.includes('taxe') || lib.includes('frais') || lib.includes('commission')) return 'FRAIS'
+  if (lib.includes('taxe')) return 'TAXE'
+  if (lib.includes('frais') || lib.includes('commission')) return 'FRAIS'
+  if (lib.startsWith('achat') || lib.includes(' achat')) return 'ACHAT'
+  if (lib.startsWith('vente') || lib.includes(' vente')) return 'VENTE'
+  if (lib.includes('sousc') || lib.includes('script')) return 'SCRIPT'
   return 'UNKNOWN'
 }
 

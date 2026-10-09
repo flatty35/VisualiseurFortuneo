@@ -1,9 +1,11 @@
 import type { Operation, OperationType } from '@/domain/types'
 
+export type MarkerKind = 'entry' | 'exit' | 'event'
+
 export interface OperationMarker {
   date: string
   seriesId: string // ISIN — only attach to that position series
-  kind: 'entry' | 'exit'
+  kind: MarkerKind
   type: OperationType
   label: string
   quantity?: number
@@ -29,6 +31,29 @@ function isQtyOp(type: OperationType): boolean {
   )
 }
 
+function isEventOp(type: OperationType): boolean {
+  return (
+    type === 'DIVIDENDE' ||
+    type === 'DETACHEMENT' ||
+    type === 'TAXE' ||
+    type === 'FRAIS' ||
+    type === 'SCRIPT' ||
+    type === 'ACTIONS_GRATUITES' ||
+    type === 'AUGMENTATION_CAPITAL' ||
+    type === 'OST_OTHER' ||
+    type === 'OST_SPLIT' ||
+    type === 'OST_FUSION' ||
+    type === 'UNKNOWN'
+  )
+}
+
+function markerKind(type: OperationType): MarkerKind | null {
+  if (type === 'ACHAT') return 'entry'
+  if (type === 'VENTE' || type === 'RACHAT') return 'exit'
+  if (isEventOp(type)) return 'event'
+  return null
+}
+
 function signedQty(type: OperationType, qty: number): number {
   const q = Math.abs(qty)
   if (
@@ -45,12 +70,14 @@ function signedQty(type: OperationType, qty: number): number {
 }
 
 /**
- * Build entry/exit markers with running qty/PRU per ISIN.
- * Markers always carry seriesId = ISIN (never for portfolio/cash).
+ * Build chart markers per ISIN:
+ * - ACHAT → green triangle (entry)
+ * - VENTE / RACHAT → red triangle (exit)
+ * - dividendes, taxes, scripts, OST… → gray square (event)
  */
 export function buildOperationMarkers(operations: Operation[]): OperationMarker[] {
   const sorted = [...operations]
-    .filter((o) => !o.synthetic && o.isin && isQtyOp(o.type))
+    .filter((o) => !o.synthetic && o.isin && (isQtyOp(o.type) || isEventOp(o.type)))
     .sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
 
   const state = new Map<string, { qty: number; cost: number }>()
@@ -59,44 +86,33 @@ export function buildOperationMarkers(operations: Operation[]): OperationMarker[
   for (const op of sorted) {
     const isin = op.isin!
     const cur = state.get(isin) ?? { qty: 0, cost: 0 }
-    const q = op.quantity ?? 0
-    const delta = signedQty(op.type, q)
-    const px = op.price ?? 0
-    const fees = Math.abs(op.fees ?? 0)
-
-    if (delta > 0) {
-      // Buy / script / free shares: increase cost basis
-      const addCost =
-        op.type === 'ACTIONS_GRATUITES' ? 0 : delta * px + fees
-      cur.cost += addCost
-      cur.qty += delta
-    } else if (delta < 0) {
-      // Sell: reduce cost pro-rata, PRU of remainder unchanged
-      const sellQty = Math.min(cur.qty, -delta)
-      if (cur.qty > 1e-12) {
-        const fraction = sellQty / cur.qty
-        cur.cost *= 1 - fraction
-      }
-      cur.qty = Math.max(0, cur.qty + delta)
-      if (cur.qty < 1e-12) {
-        cur.qty = 0
-        cur.cost = 0
-      }
-    }
-
-    state.set(isin, cur)
-
-    const kind: 'entry' | 'exit' | null =
-      op.type === 'ACHAT' ||
-      op.type === 'SCRIPT' ||
-      op.type === 'ACTIONS_GRATUITES' ||
-      op.type === 'AUGMENTATION_CAPITAL'
-        ? 'entry'
-        : op.type === 'VENTE' || op.type === 'RACHAT'
-          ? 'exit'
-          : null
-
+    const kind = markerKind(op.type)
     if (!kind) continue
+
+    if (isQtyOp(op.type)) {
+      const q = op.quantity ?? 0
+      const delta = signedQty(op.type, q)
+      const px = op.price ?? 0
+      const fees = Math.abs(op.fees ?? 0)
+
+      if (delta > 0) {
+        const addCost = op.type === 'ACTIONS_GRATUITES' ? 0 : delta * px + fees
+        cur.cost += addCost
+        cur.qty += delta
+      } else if (delta < 0) {
+        const sellQty = Math.min(cur.qty, -delta)
+        if (cur.qty > 1e-12) {
+          const fraction = sellQty / cur.qty
+          cur.cost *= 1 - fraction
+        }
+        cur.qty = Math.max(0, cur.qty + delta)
+        if (cur.qty < 1e-12) {
+          cur.qty = 0
+          cur.cost = 0
+        }
+      }
+      state.set(isin, cur)
+    }
 
     const pruAfter = cur.qty > 1e-12 ? cur.cost / cur.qty : undefined
 
@@ -111,7 +127,8 @@ export function buildOperationMarkers(operations: Operation[]): OperationMarker[
       netAmount: op.netAmount,
       fees: op.fees,
       qtyAfter: Math.round(cur.qty * 1e6) / 1e6,
-      pruAfter: pruAfter !== undefined ? Math.round(pruAfter * 10000) / 10000 : undefined,
+      pruAfter:
+        pruAfter !== undefined ? Math.round(pruAfter * 10000) / 10000 : undefined,
       name: op.name,
     })
   }
@@ -119,11 +136,14 @@ export function buildOperationMarkers(operations: Operation[]): OperationMarker[
   return markers
 }
 
+function kindLabel(m: OperationMarker): string {
+  if (m.kind === 'entry') return '▲ Achat'
+  if (m.kind === 'exit') return '▼ Vente'
+  return `■ ${m.type}`
+}
+
 export function formatMarkerTooltipLines(m: OperationMarker): string[] {
-  const lines: string[] = [
-    `${m.kind === 'entry' ? '▲ Entrée' : '▼ Sortie'} — ${m.type}`,
-    `Date : ${m.date}`,
-  ]
+  const lines: string[] = [`${kindLabel(m)} — ${m.type}`, `Date : ${m.date}`]
   if (m.name) lines.push(`Titre : ${m.name}`)
   if (m.quantity !== undefined) lines.push(`Quantité : ${m.quantity}`)
   if (m.price !== undefined) {
@@ -141,8 +161,10 @@ export function formatMarkerTooltipLines(m: OperationMarker): string[] {
       `Frais : ${m.fees.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
     )
   }
-  if (m.qtyAfter !== undefined) lines.push(`Qté après : ${m.qtyAfter}`)
-  if (m.pruAfter !== undefined) {
+  if (m.qtyAfter !== undefined && m.kind !== 'event') {
+    lines.push(`Qté après : ${m.qtyAfter}`)
+  }
+  if (m.pruAfter !== undefined && m.kind !== 'event') {
     lines.push(
       `PRU après : ${m.pruAfter.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
     )

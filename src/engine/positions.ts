@@ -1,25 +1,12 @@
 import { quantityDelta } from '@/domain/classify'
 import { cashImpact } from '@/engine/cashImpact'
+import { eachBusinessDay, toBusinessDay } from '@/engine/businessDays'
 import type { EnvelopeType, Operation, VirtualOpening } from '@/domain/types'
 
 export interface HoldingsSnapshot {
   date: string
   quantities: Map<string, number>
   cash: number
-}
-
-function eachBusinessDay(from: string, to: string): string[] {
-  const out: string[] = []
-  const d = new Date(from + 'T00:00:00Z')
-  const end = new Date(to + 'T00:00:00Z')
-  while (d <= end) {
-    const day = d.getUTCDay()
-    if (day !== 0 && day !== 6) {
-      out.push(d.toISOString().slice(0, 10))
-    }
-    d.setUTCDate(d.getUTCDate() + 1)
-  }
-  return out
 }
 
 /**
@@ -59,9 +46,11 @@ export function buildHoldingsSeries(input: {
   for (const op of ops) {
     // Skip POSITION_SEED qty/cash if VO already applied
     if (vo && op.synthetic && op.type === 'POSITION_SEED') continue
-    const list = byDate.get(op.date) ?? []
+    // Weekend / holiday settlement → next weekday so cash & qty are not dropped
+    const day = toBusinessDay(op.date)
+    const list = byDate.get(day) ?? []
     list.push(op)
-    byDate.set(op.date, list)
+    byDate.set(day, list)
   }
 
   const days = eachBusinessDay(startDate, endDate)

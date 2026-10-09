@@ -13,8 +13,8 @@ import type {
  * Reconstruct virtual opening at the start of the known history window
  * by walking backward from current open positions + current cash.
  *
- * Cash ops must already follow the anti-double-count rule:
- * versements/retraits (espèces) + signed Montant net (titres, no OST).
+ * Cash ops must be the espèces ledger only (no ISIN). Titres rows
+ * contribute quantity reversals but cashImpact() ignores them.
  */
 export function reconstructVirtualOpening(input: {
   envelope: EnvelopeType

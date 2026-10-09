@@ -19,6 +19,10 @@ export interface ChartSeries {
   /** Only first segment of a multi-segment line should appear in legend */
   showInLegend?: boolean
   connectGroup?: string
+  /** Parallel unit prices (€) — tooltip when chart is base 100 */
+  realPrices?: number[]
+  /** Parallel position valuations qty×price (€) */
+  valuations?: number[]
 }
 
 /** Calendar-day zoom window shared across charts (YYYY-MM-DD). */
@@ -327,15 +331,21 @@ function buildOption(
             const idx = s.dates.indexOf(m.date)
             if (idx < 0) return null
             if (s.showInLegend === false && idx === 0) return null
+            const isTrade = m.kind === 'entry' || m.kind === 'exit'
             return {
               name: `${m.type} ${m.date}`,
               coord: [s.dates[idx], s.values[idx]] as [string, number],
-              value: m.quantity ?? 0,
-              symbol: 'triangle',
+              value: m.quantity ?? m.netAmount ?? 0,
+              symbol: isTrade ? 'triangle' : 'rect',
               symbolSize: 11,
-              symbolRotate: m.kind === 'entry' ? 0 : 180,
+              symbolRotate: m.kind === 'exit' ? 180 : 0,
               itemStyle: {
-                color: m.kind === 'entry' ? '#5fad7a' : '#e07a5f',
+                color:
+                  m.kind === 'entry'
+                    ? '#5fad7a'
+                    : m.kind === 'exit'
+                      ? '#e07a5f'
+                      : '#8a9a92',
               },
             }
           })
@@ -405,13 +415,15 @@ function buildOption(
       className: 'vf-echarts-tooltip',
       appendToBody: true,
       confine: false,
-      enterable: true,
-      hideDelay: 80,
+      // Must not capture the pointer — otherwise pan/drag stops when the
+      // tooltip flips under the cursor (common when dragging right).
+      enterable: false,
+      hideDelay: 0,
       backgroundColor: 'rgba(12, 24, 18, 0.96)',
       borderColor: 'rgba(196, 163, 90, 0.35)',
       textStyle: { color: '#e8f0eb', fontSize: 12 },
       extraCssText:
-        'z-index:2147483646;max-width:min(380px,92vw);pointer-events:auto;box-shadow:0 8px 28px rgba(0,0,0,.45);white-space:normal;line-height:1.35',
+        'z-index:2147483646;max-width:min(380px,92vw);pointer-events:none;box-shadow:0 8px 28px rgba(0,0,0,.45);white-space:normal;line-height:1.35',
       position: (
         pos: number[],
         _params: unknown,
@@ -428,8 +440,9 @@ function buildOption(
           return [pos[0] + gap, pos[1] - gap]
         }
 
+        // Prefer below-right of the cursor so the box stays out of the drag path
         let pageX = bounds.left + pos[0] + gap
-        let pageY = bounds.top + pos[1] - gap
+        let pageY = bounds.top + pos[1] + gap
 
         if (pageX + boxW > window.innerWidth - 8) {
           pageX = bounds.left + pos[0] - boxW - gap

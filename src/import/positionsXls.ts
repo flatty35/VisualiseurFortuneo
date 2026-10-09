@@ -37,6 +37,9 @@ function mapPositions(records: Record<string, unknown>[]): ParsedPosition[] {
     if (!isin || isin.length < 8) continue
 
     const name = String(get('libelle', 'libellé', 'nom', 'designation') ?? isin).trim()
+    // Fortuneo duplicates every line as « Solde position CPT » — not a holding.
+    if (/^solde\s+position\b/i.test(name)) continue
+
     const quantity = parseFrenchNumber(get('qte', 'quantite', 'quantité', 'quantity'))
     if (quantity === undefined || quantity === 0) continue
 
@@ -126,12 +129,16 @@ export function extractCashFromPositions(positions: ParsedPosition[]): number | 
       .normalize('NFD')
       .replace(/\p{M}/gu, '')
       .toLowerCase()
+    // Never match « Solde position CPT » (security sub-rows).
+    if (/^solde\s+position\b/.test(n)) return false
     return (
       n.includes('espece') ||
       n.includes('liquidit') ||
       n.includes('especes') ||
-      n.includes('cash') ||
-      n.includes('solde') ||
+      n === 'cash' ||
+      n.includes('especes disponibles') ||
+      n.includes('solde especes') ||
+      n.includes('solde cash') ||
       p.isin === 'CASH' ||
       p.isin === 'EUR' ||
       p.isin.startsWith('XX')

@@ -1,4 +1,5 @@
 import { cashImpact } from '@/engine/cashImpact'
+import { eachBusinessDay, toBusinessDay } from '@/engine/businessDays'
 import type { Operation } from '@/domain/types'
 
 export interface CashPoint {
@@ -23,9 +24,8 @@ function opOrder(op: Operation): number {
  * Build a cash curve with visible spikes when the account is funded
  * before purchases on the same day.
  *
- * Data model (same as FortuneoPEAViewer):
- * - VERSEMENT / RETRAIT from historique espèces
- * - signed Montant net from historique titres (not the espèces trade mirrors)
+ * Cash follows the Fortuneo espèces ledger (Débit/Crédit). Titres rows
+ * (with ISIN) do not move cash — see cashImpact().
  */
 export function buildCashSpikeSeries(input: {
   operations: Operation[]
@@ -42,15 +42,19 @@ export function buildCashSpikeSeries(input: {
         a.id.localeCompare(b.id),
     )
 
+  const from = toBusinessDay(input.from)
+  const to = input.to
+
   const byDate = new Map<string, Operation[]>()
   for (const op of ops) {
-    if (op.date < input.from || op.date > input.to) continue
-    const list = byDate.get(op.date) ?? []
+    const day = toBusinessDay(op.date)
+    if (day < from || day > to) continue
+    const list = byDate.get(day) ?? []
     list.push(op)
-    byDate.set(op.date, list)
+    byDate.set(day, list)
   }
 
-  const days = eachBusinessDay(input.from, input.to)
+  const days = eachBusinessDay(from, to)
   const points: CashPoint[] = []
   let cash = input.openingCash
 
@@ -84,16 +88,4 @@ export function buildCashSpikeSeries(input: {
   }
 
   return points
-}
-
-function eachBusinessDay(from: string, to: string): string[] {
-  const out: string[] = []
-  const d = new Date(from + 'T00:00:00Z')
-  const end = new Date(to + 'T00:00:00Z')
-  while (d <= end) {
-    const day = d.getUTCDay()
-    if (day !== 0 && day !== 6) out.push(d.toISOString().slice(0, 10))
-    d.setUTCDate(d.getUTCDate() + 1)
-  }
-  return out
 }

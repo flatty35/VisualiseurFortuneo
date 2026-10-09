@@ -22,13 +22,13 @@ export default function ChartsPage() {
   const [envelope, setEnvelope] = useState<EnvelopeType>('PEA')
   const [period, setPeriod] = useState<ChartPeriod>('1Y')
   const [selectedIsins, setSelectedIsins] = useState<string[]>([])
+  const [pickerFilter, setPickerFilter] = useState('')
   const [showCash, setShowCash] = useState(true)
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null)
   const autoRefreshDone = useRef(false)
 
-  // Period / envelope change → full window again
   useEffect(() => {
     setZoomRange(null)
   }, [period, envelope])
@@ -52,7 +52,6 @@ export default function ChartsPage() {
     try {
       await ensureHistoricalSupports()
     } catch (e) {
-      // Non-fatal: charts can still render with existing keys
       console.warn('ensureHistoricalSupports', e)
     }
     const [operations, supports, vo, quotes] = await Promise.all([
@@ -67,141 +66,149 @@ export default function ChartsPage() {
   const model = useMemo(() => {
     if (!data) return null
     try {
-    const holdings = buildHoldingsSeries({
-      envelope,
-      operations: data.operations,
-      virtualOpening: data.vo,
-    })
-    if (!holdings.length) return null
-
-    const allDates = holdings.map((h) => h.date)
-    const { from, to } = sliceByPeriod(allDates, period)
-    const sliced = holdings.filter((h) => h.date >= from && h.date <= to)
-    const valued = valueHoldingsSeries({
-      holdings: sliced,
-      supports: data.supports,
-      quotes: data.quotes,
-    })
-
-    const tickersMapped = data.supports.filter((s) => s.yahooTicker).length
-    const tickersCached = [...data.quotes.values()].filter((b) => b.length > 0).length
-
-    // ——— Valorisation (absolute €) ———
-    const valorisation: ChartSeries[] = [
-      {
-        id: 'total',
-        name: 'Portefeuille',
-        dates: valued.map((v) => v.date),
-        values: valued.map((v) => v.total),
-        showInLegend: true,
-      },
-    ]
-    if (showCash) {
-      const cashFull = buildCashSpikeSeries({
-        operations: data.operations.filter((o) => o.envelope === envelope),
-        openingCash: data.vo?.cash ?? 0,
-        from: holdings[0]?.date ?? from,
-        to: holdings[holdings.length - 1]?.date ?? to,
+      const holdings = buildHoldingsSeries({
+        envelope,
+        operations: data.operations,
+        virtualOpening: data.vo,
       })
-      const cashPts = cashFull.filter((p) => p.day >= from && p.day <= to)
-      valorisation.push({
-        id: 'cash',
-        name: 'Espèces',
-        dates: cashPts.map((p) => p.date),
-        values: cashPts.map((p) => p.cash),
-        dashed: true,
-        step: 'end',
-        showInLegend: true,
+      if (!holdings.length) return null
+
+      const allDates = holdings.map((h) => h.date)
+      const { from, to } = sliceByPeriod(allDates, period)
+      const sliced = holdings.filter((h) => h.date >= from && h.date <= to)
+      const valued = valueHoldingsSeries({
+        holdings: sliced,
+        supports: data.supports,
+        quotes: data.quotes,
       })
-    }
-    for (const isin of selectedIsins) {
-      const s = data.supports.find((x) => x.isin === isin)
-      const opName = data.operations.find((o) => o.isin === isin && o.name)?.name
-      valorisation.push({
-        id: isin,
-        name: s?.name ?? opName ?? isin,
-        dates: valued.map((v) => v.date),
-        values: valued.map((v) => v.byIsin[isin] ?? 0),
-        isPosition: true,
-        connectGroup: isin,
-        showInLegend: true,
-      })
-    }
 
-    const selectedSet = new Set(selectedIsins)
-    const markers = buildOperationMarkers(data.operations).filter(
-      (m) => m.date >= from && m.date <= to && selectedSet.has(m.seriesId),
-    )
+      const tickersMapped = data.supports.filter((s) => s.yahooTicker).length
+      const tickersCached = [...data.quotes.values()].filter((b) => b.length > 0)
+        .length
 
-    // ——— Comparaison des cours (base 100 @ 1er achat) ———
-    const names: Record<string, string> = {}
-    for (const s of data.supports) names[s.isin] = s.name
-    for (const o of data.operations) {
-      if (o.isin && o.name && !names[o.isin]) names[o.isin] = o.name
-    }
-    const compareIsins =
-      selectedIsins.length > 0
-        ? selectedIsins
-        : [] // require selection for price compare clarity
-    const priceCompare = buildPriceCompareSeries({
-      isins: compareIsins,
-      names,
-      supports: data.supports,
-      quotes: data.quotes,
-      operations: data.operations,
-      holdings,
-      from,
-      to,
-    }).map((s) => ({
-      ...s,
-      isPosition: true,
-    }))
-
-    // ISIN picker list
-    const heldNow = new Set<string>()
-    const last = holdings[holdings.length - 1]
-    if (last) {
-      for (const [isin, qty] of last.quantities) {
-        if (Math.abs(qty) > 1e-8) heldNow.add(isin)
-      }
-    }
-    const allIsins = new Map<string, { name: string }>()
-    for (const o of data.operations) {
-      if (!o.isin || o.synthetic) continue
-      if (!allIsins.has(o.isin)) {
-        allIsins.set(o.isin, {
-          name: o.name ?? data.supports.find((s) => s.isin === o.isin)?.name ?? o.isin,
+      const valorisation: ChartSeries[] = [
+        {
+          id: 'total',
+          name: 'Portefeuille',
+          dates: valued.map((v) => v.date),
+          values: valued.map((v) => v.total),
+          showInLegend: true,
+        },
+      ]
+      if (showCash) {
+        const cashFull = buildCashSpikeSeries({
+          operations: data.operations.filter((o) => o.envelope === envelope),
+          openingCash: data.vo?.cash ?? 0,
+          from: holdings[0]?.date ?? from,
+          to: holdings[holdings.length - 1]?.date ?? to,
+        })
+        const cashPts = cashFull.filter((p) => p.day >= from && p.day <= to)
+        valorisation.push({
+          id: 'cash',
+          name: 'Espèces',
+          dates: cashPts.map((p) => p.date),
+          values: cashPts.map((p) => p.cash),
+          dashed: true,
+          step: 'end',
+          showInLegend: true,
         })
       }
-    }
-    for (const s of data.supports) {
-      if (!allIsins.has(s.isin)) allIsins.set(s.isin, { name: s.name })
-    }
-    const isinList = [...allIsins.entries()]
-      .map(([isin, meta]) => ({
-        isin,
-        name: meta.name,
-        closed: !heldNow.has(isin),
-      }))
-      .sort((a, b) => {
-        if (a.closed !== b.closed) return a.closed ? 1 : -1
-        return a.name.localeCompare(b.name, 'fr')
-      })
+      for (const isin of selectedIsins) {
+        const s = data.supports.find((x) => x.isin === isin)
+        const opName = data.operations.find((o) => o.isin === isin && o.name)?.name
+        valorisation.push({
+          id: isin,
+          name: s?.name ?? opName ?? isin,
+          dates: valued.map((v) => v.date),
+          values: valued.map((v) => v.byIsin[isin] ?? 0),
+          isPosition: true,
+          connectGroup: isin,
+          showInLegend: true,
+        })
+      }
 
-    return {
-      valorisation,
-      priceCompare,
-      markers,
-      isinList,
-      tickersMapped,
-      tickersCached,
-      lastTotal: valued[valued.length - 1]?.total ?? 0,
-    }
+      const selectedSet = new Set(selectedIsins)
+      const markers = buildOperationMarkers(data.operations).filter(
+        (m) => m.date >= from && m.date <= to && selectedSet.has(m.seriesId),
+      )
+
+      const names: Record<string, string> = {}
+      for (const s of data.supports) names[s.isin] = s.name
+      for (const o of data.operations) {
+        if (o.isin && o.name && !names[o.isin]) names[o.isin] = o.name
+      }
+      const compareIsins = selectedIsins.length > 0 ? selectedIsins : []
+      const priceCompare = buildPriceCompareSeries({
+        isins: compareIsins,
+        names,
+        supports: data.supports,
+        quotes: data.quotes,
+        operations: data.operations,
+        holdings,
+        from,
+        to,
+      }).map((s) => ({
+        ...s,
+        isPosition: true,
+      }))
+
+      const heldNow = new Set<string>()
+      const last = holdings[holdings.length - 1]
+      if (last) {
+        for (const [isin, qty] of last.quantities) {
+          if (Math.abs(qty) > 1e-8) heldNow.add(isin)
+        }
+      }
+      const allIsins = new Map<string, { name: string }>()
+      for (const o of data.operations) {
+        if (!o.isin || o.synthetic) continue
+        if (!allIsins.has(o.isin)) {
+          allIsins.set(o.isin, {
+            name:
+              o.name ??
+              data.supports.find((s) => s.isin === o.isin)?.name ??
+              o.isin,
+          })
+        }
+      }
+      for (const s of data.supports) {
+        if (!allIsins.has(s.isin)) allIsins.set(s.isin, { name: s.name })
+      }
+      const isinList = [...allIsins.entries()]
+        .map(([isin, meta]) => ({
+          isin,
+          name: meta.name,
+          closed: !heldNow.has(isin),
+        }))
+        .sort((a, b) => {
+          if (a.closed !== b.closed) return a.closed ? 1 : -1
+          return a.name.localeCompare(b.name, 'fr')
+        })
+
+      return {
+        valorisation,
+        priceCompare,
+        markers,
+        isinList,
+        tickersMapped,
+        tickersCached,
+        lastTotal: valued[valued.length - 1]?.total ?? 0,
+      }
     } catch (e) {
       console.error('Charts model', e)
       return null
     }
   }, [data, envelope, period, selectedIsins, showCash])
+
+  const filteredIsins = useMemo(() => {
+    const list = model?.isinList ?? []
+    const q = pickerFilter.trim().toLowerCase()
+    if (!q) return list
+    return list.filter(
+      (x) =>
+        x.name.toLowerCase().includes(q) || x.isin.toLowerCase().includes(q),
+    )
+  }, [model?.isinList, pickerFilter])
 
   const onRefreshQuotes = async () => {
     if (!data) return
@@ -248,153 +255,200 @@ export default function ChartsPage() {
   }
 
   return (
-    <div>
-      <section className="panel">
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '0.75rem',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
+    <div className="charts-page">
+      <section className="panel charts-toolbar">
+        <div className="charts-toolbar-row">
           <h1 style={{ margin: 0 }}>Graphiques</h1>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div className="charts-toolbar-controls">
             <select
               value={envelope}
               onChange={(e) => setEnvelope(e.target.value as EnvelopeType)}
+              aria-label="Enveloppe"
             >
               <option value="PEA">PEA</option>
               <option value="PEA_PME">PEA-PME</option>
               <option value="CTO">CTO</option>
             </select>
+            <div className="pill-row">
+              {(['1M', '3M', '1Y', '3Y', '10Y', 'MAX'] as ChartPeriod[]).map(
+                (p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={`pill ${period === p ? 'active' : ''}`}
+                    onClick={() => setPeriod(p)}
+                  >
+                    {p === '1Y'
+                      ? '1A'
+                      : p === '3Y'
+                        ? '3A'
+                        : p === '10Y'
+                          ? '10A'
+                          : p}
+                  </button>
+                ),
+              )}
+            </div>
+            <label className="charts-cash-toggle muted">
+              <input
+                type="checkbox"
+                checked={showCash}
+                onChange={(e) => setShowCash(e.target.checked)}
+              />{' '}
+              Espèces
+            </label>
             <button
               type="button"
               className="btn"
               disabled={refreshing || !data}
               onClick={onRefreshQuotes}
             >
-              {refreshing ? 'Maj cours…' : 'Rafraîchir cours'}
+              {refreshing ? 'Maj…' : 'Rafraîchir cours'}
             </button>
           </div>
         </div>
-        {refreshMsg && <p className="muted">{refreshMsg}</p>}
+        {refreshMsg && (
+          <p className="muted" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+            {refreshMsg}
+          </p>
+        )}
         {error && (
           <div className="badge warn" style={{ display: 'block', marginTop: 8 }}>
             Erreur chargement : {error}
           </div>
         )}
-
-        <div className="pill-row" style={{ marginTop: 12 }}>
-          {(['1M', '3M', '1Y', '3Y', '10Y', 'MAX'] as ChartPeriod[]).map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={`pill ${period === p ? 'active' : ''}`}
-              onClick={() => setPeriod(p)}
-            >
-              {p === '1Y' ? '1A' : p === '3Y' ? '3A' : p === '10Y' ? '10A' : p}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ marginTop: '1rem' }}>
-          <label className="muted" style={{ marginRight: 16 }}>
-            <input
-              type="checkbox"
-              checked={showCash}
-              onChange={(e) => setShowCash(e.target.checked)}
-            />{' '}
-            Afficher espèces (valorisation)
-          </label>
-          <div className="muted" style={{ margin: '0.5rem 0' }}>
-            Titres à afficher — ouverts et sortis (valorisations + comparaison des cours) ·
-            cache {model?.tickersCached ?? 0}/{model?.tickersMapped ?? 0}
-          </div>
-          <div className="pill-row">
-            {(model?.isinList ?? []).map(({ isin, name, closed }) => (
-              <button
-                key={isin}
-                type="button"
-                className={`pill ${selectedIsins.includes(isin) ? 'active' : ''}`}
-                onClick={() => toggleIsin(isin)}
-                title={closed ? `${isin} (plus en portefeuille)` : isin}
-                style={closed ? { opacity: 0.75 } : undefined}
-              >
-                {(name || isin).length > 24
-                  ? (name || isin).slice(0, 24) + '…'
-                  : name || isin}
-                {closed ? ' · sorti' : ''}
-              </button>
-            ))}
-          </div>
-        </div>
       </section>
 
       {loading && (
-        <section className="panel">
+        <section className="panel" style={{ marginTop: '1rem' }}>
           <p className="muted">Chargement…</p>
         </section>
       )}
       {!loading && !model && (
-        <section className="panel">
-          <p className="muted">Aucune donnée pour cette enveloppe — lancez un import.</p>
+        <section className="panel" style={{ marginTop: '1rem' }}>
+          <p className="muted">
+            Aucune donnée pour cette enveloppe — lancez un import.
+          </p>
         </section>
       )}
 
       {model && (
-        <>
-          <section className="panel">
-            <h2 style={{ marginTop: 0 }}>Graphique de valorisation</h2>
-            <p className="muted" style={{ marginTop: 0 }}>
-              Valeur absolue du portefeuille et des positions sélectionnées (€). Triangles =
-              opérations sur les titres sélectionnés.
-            </p>
-            {model.tickersMapped > 0 && model.tickersCached === 0 && (
-              <div className="badge warn" style={{ display: 'block', marginBottom: 8 }}>
-                Aucun historique Yahoo en cache — utilisez « Rafraîchir cours ».
-              </div>
-            )}
-            <PortfolioChart
-              series={model.valorisation}
-              markers={model.markers}
-              mode="euro"
-              period={period}
-              onPeriod={setPeriod}
-              showPeriodBar={false}
-              zoomRange={zoomRange}
-              onZoomRangeChange={onZoomRangeChange}
+        <div className="charts-layout">
+          <aside className="panel charts-picker" aria-label="Sélection des titres">
+            <div className="charts-picker-head">
+              <strong>Titres</strong>
+              <span className="muted charts-picker-count">
+                {selectedIsins.length}/{model.isinList.length}
+              </span>
+            </div>
+            <input
+              type="search"
+              className="charts-picker-filter"
+              placeholder="Filtrer…"
+              value={pickerFilter}
+              onChange={(e) => setPickerFilter(e.target.value)}
+              aria-label="Filtrer les titres"
             />
-          </section>
+            <div className="charts-picker-actions">
+              <button
+                type="button"
+                className="pill"
+                disabled={selectedIsins.length === 0}
+                onClick={() => setSelectedIsins([])}
+              >
+                Tout ôter
+              </button>
+              <span className="muted" style={{ fontSize: '0.75rem' }}>
+                cache {model.tickersCached}/{model.tickersMapped}
+              </span>
+            </div>
+            <ul className="charts-picker-list">
+              {filteredIsins.map(({ isin, name, closed }) => {
+                const on = selectedIsins.includes(isin)
+                return (
+                  <li key={isin}>
+                    <button
+                      type="button"
+                      className={`charts-picker-item${on ? ' active' : ''}${closed ? ' closed' : ''}`}
+                      onClick={() => toggleIsin(isin)}
+                      title={closed ? `${isin} (sorti)` : isin}
+                      aria-pressed={on}
+                    >
+                      <span className="charts-picker-check" aria-hidden>
+                        {on ? '✓' : ''}
+                      </span>
+                      <span className="charts-picker-name">{name || isin}</span>
+                      {closed && (
+                        <span className="charts-picker-tag">sorti</span>
+                      )}
+                    </button>
+                  </li>
+                )
+              })}
+              {filteredIsins.length === 0 && (
+                <li className="muted" style={{ padding: '0.5rem', fontSize: '0.85rem' }}>
+                  Aucun titre
+                </li>
+              )}
+            </ul>
+          </aside>
 
-          <section className="panel">
-            <h2 style={{ marginTop: 0 }}>Comparaison des cours</h2>
-            <p className="muted" style={{ marginTop: 0 }}>
-              Base 100 au jour du premier achat. Ligne <strong>pleine</strong> tant qu’une
-              position nette est ouverte, <strong>pointillée</strong> sinon — les segments
-              se raccordent. Le zoom est synchronisé avec la valorisation (mêmes dates).
-            </p>
-            {selectedIsins.length === 0 ? (
-              <p className="muted">Sélectionnez un ou plusieurs titres ci-dessus.</p>
-            ) : model.priceCompare.length === 0 ? (
-              <p className="muted">
-                Pas assez de cours pour tracer la comparaison (ticker / historique manquant).
-              </p>
-            ) : (
+          <div className="charts-stack">
+            <section className="panel charts-panel">
+              <div className="charts-panel-head">
+                <h2>Valorisation</h2>
+                <span className="muted">€ · zoom sync</span>
+              </div>
+              {model.tickersMapped > 0 && model.tickersCached === 0 && (
+                <div
+                  className="badge warn"
+                  style={{ display: 'block', marginBottom: 8 }}
+                >
+                  Aucun historique Yahoo en cache — « Rafraîchir cours ».
+                </div>
+              )}
               <PortfolioChart
-                series={model.priceCompare}
+                series={model.valorisation}
                 markers={model.markers}
-                mode="index"
+                mode="euro"
                 period={period}
                 onPeriod={setPeriod}
                 showPeriodBar={false}
                 zoomRange={zoomRange}
                 onZoomRangeChange={onZoomRangeChange}
+                height={380}
               />
-            )}
-          </section>
-        </>
+            </section>
+
+            <section className="panel charts-panel">
+              <div className="charts-panel-head">
+                <h2>Cours</h2>
+                <span className="muted">base 100 · 1er achat</span>
+              </div>
+              {selectedIsins.length === 0 ? (
+                <p className="muted" style={{ margin: '0.5rem 0' }}>
+                  Cochez un titre à gauche.
+                </p>
+              ) : model.priceCompare.length === 0 ? (
+                <p className="muted" style={{ margin: '0.5rem 0' }}>
+                  Pas assez de cours (ticker / historique manquant).
+                </p>
+              ) : (
+                <PortfolioChart
+                  series={model.priceCompare}
+                  markers={model.markers}
+                  mode="index"
+                  period={period}
+                  onPeriod={setPeriod}
+                  showPeriodBar={false}
+                  zoomRange={zoomRange}
+                  onZoomRangeChange={onZoomRangeChange}
+                  height={380}
+                />
+              )}
+            </section>
+          </div>
+        </div>
       )}
     </div>
   )

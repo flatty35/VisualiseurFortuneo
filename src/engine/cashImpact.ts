@@ -1,6 +1,6 @@
 import type { Operation, OperationType } from '@/domain/types'
 
-/** Types that move the cash pocket (Fortuneo signed Montant net / crédit-débit). */
+/** Types that may carry a signed cash amount on the espèces ledger. */
 const CASH_TYPES = new Set<OperationType>([
   'ACHAT',
   'VENTE',
@@ -12,24 +12,22 @@ const CASH_TYPES = new Set<OperationType>([
   'FRAIS',
   'TAXE',
   'AUGMENTATION_CAPITAL',
+  'UNKNOWN',
 ])
 
 /**
  * Cash delta for an operation.
  *
- * Convention (aligned with FortuneoPEAViewer):
- * - Espèces: only VERSEMENT / RETRAIT (trade mirrors ignored at parse time)
- * - Titres: use signed Montant net as-is; OST/détachement → 0 (encaissement keeps the cash)
+ * Cash pocket follows the Fortuneo **espèces** file (Débit/Crédit) only.
+ * Titres rows (have an ISIN) drive quantities — their Montant net is ignored
+ * here so we do not drift vs the bank cash ledger.
  */
 export function cashImpact(op: Operation): number {
   if (op.type === 'POSITION_SEED') return 0
+  // Titres / seeded lines with a security key → quantity only
+  if (op.isin) return 0
   if (!CASH_TYPES.has(op.type)) return 0
   if (op.netAmount === undefined || !Number.isFinite(op.netAmount)) return 0
-
-  if (op.type === 'VERSEMENT') return Math.abs(op.netAmount)
-  if (op.type === 'RETRAIT') return -Math.abs(op.netAmount)
-
-  // Titres & frais: Fortuneo already signs Montant net (buy/tax negative, sell/div positive)
   return op.netAmount
 }
 

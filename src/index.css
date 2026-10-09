@@ -61,6 +61,196 @@ a:hover {
   padding: 1.25rem 1.25rem 3rem;
 }
 
+.app-shell--wide {
+  max-width: min(1680px, 100%);
+  padding-left: clamp(0.75rem, 1.5vw, 1.5rem);
+  padding-right: clamp(0.75rem, 1.5vw, 1.5rem);
+}
+
+/* Charts: picker sticky beside both plots */
+.charts-page {
+  margin-top: 0;
+}
+
+.charts-toolbar {
+  margin-bottom: 0.75rem;
+}
+
+.charts-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.charts-toolbar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+}
+
+.charts-cash-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.charts-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  margin-top: 0.75rem;
+}
+
+.charts-picker {
+  position: sticky;
+  top: 0.5rem;
+  max-height: calc(100vh - 1rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem 0.9rem;
+  overflow: hidden;
+}
+
+.charts-picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.charts-picker-count {
+  font-size: 0.8rem;
+}
+
+.charts-picker-filter {
+  width: 100%;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.85rem;
+  border-radius: 8px;
+}
+
+.charts-picker-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.charts-picker-actions .pill {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+.charts-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 0.35rem;
+}
+
+.charts-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.25;
+  padding: 0.32rem 0.35rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.charts-picker-item:hover {
+  background: rgba(125, 206, 160, 0.08);
+  color: var(--ink);
+}
+
+.charts-picker-item.active {
+  background: rgba(196, 163, 90, 0.16);
+  color: var(--ink);
+}
+
+.charts-picker-item.closed {
+  opacity: 0.78;
+}
+
+.charts-picker-check {
+  flex: 0 0 1rem;
+  width: 1rem;
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+.charts-picker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.charts-picker-tag {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  color: var(--ink-muted);
+  opacity: 0.9;
+}
+
+.charts-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.charts-panel {
+  padding: 0.9rem 1rem 0.75rem;
+}
+
+.charts-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.charts-panel-head h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.charts-panel-head .muted {
+  font-size: 0.8rem;
+}
+
+@media (max-width: 960px) {
+  .charts-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .charts-picker {
+    position: static;
+    max-height: 220px;
+  }
+}
+
 .nav {
   display: flex;
   flex-wrap: wrap;
@@ -276,4 +466,5 @@ table.data th {
 /* Chart tooltips (appendToBody) — above panels / other chart layers */
 .vf-echarts-tooltip {
   z-index: 2147483646 !important;
+  pointer-events: none !important;
 }

@@ -216,85 +216,104 @@ export async function searchIsinMorningstarLocal(
       },
     }
   }
-  try {
-    const url = `/api/morningstar?q=${encodeURIComponent(q)}`
-    const res = await fetch(url, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(20000),
-    })
-    if (!res.ok) {
+  // Morningstar often returns HTTP 202 + empty body (bot challenge). Retry a few times.
+  let lastDetail = ''
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (attempt === 1) {
+        // Warm-up cookies via Vite middleware
+        await fetch('/api/morningstar-warmup', {
+          signal: AbortSignal.timeout(10000),
+        }).catch(() => undefined)
+      }
+      const url = `/api/morningstar?q=${encodeURIComponent(q)}`
+      const res = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(20000),
+      })
+      const text = await res.text()
+      if (!res.ok) {
+        lastDetail = `HTTP ${res.status}`
+        continue
+      }
+      if (!text || !text.trim()) {
+        lastDetail = `HTTP ${res.status} corps vide (challenge bot)`
+        await new Promise((r) => setTimeout(r, 400 * attempt))
+        continue
+      }
+      let json: {
+        results?: Array<{
+          type?: string
+          score?: number
+          value?: {
+            isin?: string
+            name?: string
+            shortName?: string
+            companyName?: string
+            ticker?: string
+            exchange?: string
+            exchangeCountry?: string
+            investmentType?: string
+          }
+        }>
+      }
+      try {
+        json = JSON.parse(text) as typeof json
+      } catch {
+        lastDetail = `JSON invalide (${text.slice(0, 80)}…)`
+        continue
+      }
+      const hits: IsinSearchHit[] = []
+      for (const item of json.results ?? []) {
+        if (item.type !== 'security' || !item.value?.isin) continue
+        const v = item.value
+        const isin = v.isin!.toUpperCase()
+        if (!isValidIsin(isin)) continue
+        let ticker = (v.ticker || '').replace(/\s+/g, '')
+        if (ticker && !ticker.includes('.')) {
+          if (v.exchange === 'XPAR' || v.exchangeCountry === 'FRA') {
+            ticker = `${ticker}.PA`
+          } else if (v.exchange === 'XMAD' || v.exchangeCountry === 'ESP') {
+            ticker = `${ticker}.MC`
+          }
+        }
+        hits.push({
+          isin,
+          name: v.name || v.shortName || v.companyName,
+          ticker,
+          figiTicker: v.ticker,
+          exchange: v.exchange,
+          exchangeCountry: v.exchangeCountry,
+          investmentType: v.investmentType,
+          score: item.score,
+          source: 'morningstar',
+        })
+      }
       return {
-        hits: [],
+        hits,
         debug: {
           phase: 'morningstar-local',
           query: q,
-          ok: false,
-          detail: `HTTP ${res.status}`,
-          count: 0,
+          ok: hits.length > 0,
+          detail:
+            hits.length > 0
+              ? `${hits.length} hit(s), 1er=${hits[0].isin} (essai ${attempt})`
+              : `réponse OK mais aucun ISIN (essai ${attempt})`,
+          count: hits.length,
         },
       }
+    } catch (e) {
+      lastDetail = e instanceof Error ? e.message : String(e)
     }
-    const json = (await res.json()) as {
-      results?: Array<{
-        type?: string
-        score?: number
-        value?: {
-          isin?: string
-          name?: string
-          shortName?: string
-          companyName?: string
-          ticker?: string
-          exchange?: string
-          exchangeCountry?: string
-          investmentType?: string
-        }
-      }>
-    }
-    const hits: IsinSearchHit[] = []
-    for (const item of json.results ?? []) {
-      if (item.type !== 'security' || !item.value?.isin) continue
-      const v = item.value
-      const isin = v.isin!.toUpperCase()
-      if (!isValidIsin(isin)) continue
-      let ticker = (v.ticker || '').replace(/\s+/g, '')
-      if (ticker && (v.exchange === 'XPAR' || v.exchangeCountry === 'FRA')) {
-        if (!ticker.includes('.')) ticker = `${ticker}.PA`
-      }
-      hits.push({
-        isin,
-        name: v.name || v.shortName || v.companyName,
-        ticker,
-        figiTicker: v.ticker,
-        exchange: v.exchange,
-        exchangeCountry: v.exchangeCountry,
-        investmentType: v.investmentType,
-        score: item.score,
-        source: 'morningstar',
-      })
-    }
-    return {
-      hits,
-      debug: {
-        phase: 'morningstar-local',
-        query: q,
-        ok: hits.length > 0,
-        detail:
-          hits.length > 0
-            ? `${hits.length} hit(s), 1er=${hits[0].isin}`
-            : 'réponse OK mais aucun ISIN',
-        count: hits.length,
-      },
-    }
-  } catch (e) {
-    return {
-      hits: [],
-      debug: {
-        phase: 'morningstar-local',
-        query: q,
-        ok: false,
-        detail: e instanceof Error ? e.message : String(e),
-      },
-    }
+  }
+  return {
+    hits: [],
+    debug: {
+      phase: 'morningstar-local',
+      query: q,
+      ok: false,
+      detail: lastDetail || 'échec',
+    },
   }
 }
 
@@ -315,10 +334,13 @@ export async function searchIsinCandidates(input: {
   const errors: string[] = []
   const queries = buildSearchQueries(name)
 
-  const bareTicker = input.yahooTicker
-    ?.replace(/\.[A-Za-z]{1,4}$/, '')
-    .trim()
-  if (bareTicker && !queries.includes(bareTicker)) queries.unshift(bareTicker)
+  // Prefer full Yahoo ticker first (IBE.MC) so GAS can hit Boursorama Madrid/etc.
+  if (input.yahooTicker?.trim()) {
+    const yt = input.yahooTicker.trim()
+    if (!queries.includes(yt)) queries.unshift(yt)
+    const bareTicker = yt.replace(/\.[A-Za-z]{1,4}$/, '')
+    if (bareTicker && !queries.includes(bareTicker)) queries.splice(1, 0, bareTicker)
+  }
 
   const ingest = (
     hits: IsinSearchHit[],
@@ -423,13 +445,14 @@ export async function searchIsinCandidates(input: {
         .sort((a, b) => b.score - a.score)
         .slice(0, 5)
       for (const { h } of symbols) {
-        const bare = h.symbol.replace(/\.[A-Za-z]{1,4}$/, '')
+        // Pass full Yahoo ticker (IBE.MC) so GAS prefers Madrid FF55- paths
+        const qGas = h.symbol
         input.onStatus?.(`ISIN via ${h.symbol}…`)
         try {
-          const detailed = await searchIsinProxyDetailed(bare)
+          const detailed = await searchIsinProxyDetailed(qGas)
           debug.push({
             phase: 'gas-via-yahoo',
-            query: bare,
+            query: qGas,
             ok: detailed.results.length > 0,
             detail: detailed.debug || `${detailed.results.length} hit(s)`,
             count: detailed.results.length,
@@ -439,7 +462,7 @@ export async function searchIsinCandidates(input: {
         } catch (e) {
           debug.push({
             phase: 'gas-via-yahoo',
-            query: bare,
+            query: qGas,
             ok: false,
             detail: e instanceof Error ? e.message : String(e),
           })

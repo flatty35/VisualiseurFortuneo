@@ -45,11 +45,8 @@ export async function mergeImport(input: {
     )
   }
 
-  // Espèces parser already keeps only VERSEMENT/RETRAIT
-  const especesOps = input.especesOps.filter(
-    (o) => o.type === 'VERSEMENT' || o.type === 'RETRAIT',
-  )
-
+  // Espèces = full cash ledger; titres = quantities (cashImpact ignores ISIN rows)
+  const especesOps = input.especesOps
   const incoming = [...titresOps, ...especesOps]
   const existing = await db.operations.where('envelope').equals(envelope).toArray()
   const existingFp = new Set(existing.map((o) => o.fingerprint))
@@ -58,22 +55,6 @@ export async function mergeImport(input: {
   const syntheticIds = existing.filter((o) => o.synthetic).map((o) => o.id)
   if (syntheticIds.length) {
     await db.operations.bulkDelete(syntheticIds)
-  }
-
-  // Purge legacy espèces mirrors (achat/vente/…) that double-counted cash
-  const legacyMirrors = existing.filter(
-    (o) =>
-      !o.synthetic &&
-      !o.isin &&
-      o.type !== 'VERSEMENT' &&
-      o.type !== 'RETRAIT' &&
-      o.type !== 'POSITION_SEED',
-  )
-  if (legacyMirrors.length) {
-    await db.operations.bulkDelete(legacyMirrors.map((o) => o.id))
-    warnings.push(
-      `${legacyMirrors.length} ligne(s) espèces miroir ignorées (anti double-comptage).`,
-    )
   }
 
   const fresh = incoming.filter((o) => !existingFp.has(o.fingerprint))

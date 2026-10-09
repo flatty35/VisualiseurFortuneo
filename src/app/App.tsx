@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import DashboardPage from '@/ui/pages/DashboardPage'
 import ImportPage from '@/ui/pages/ImportPage'
 import ChartsPage from '@/ui/pages/ChartsPage'
@@ -18,8 +18,11 @@ const links = [
 ]
 
 export default function App() {
+  const { pathname } = useLocation()
+  const wide = pathname === '/charts'
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${wide ? ' app-shell--wide' : ''}`}>
       <header className="nav">
         <div className="brand">
           Visualiseur <span>Fortuneo</span>
