@@ -9,10 +9,47 @@ import {
   googleTickerFromYahoo,
   scoreYahooHit,
 } from './tickerMatch'
-import { isValidIsin, rekeySupport } from '@/persist/rekeySupport'
+import {
+  guessYahooTicker,
+  pickBestFortuneoHit,
+  searchFortuneoFirstHit,
+} from './fortuneoSearch'
+import { isValidIsin } from '@/persist/rekeySupport'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import type { Support } from '@/domain/types'
-import { listFlatSupports } from '@/persist/portfolioStore'
+import {
+  listFlatSupports,
+  updatePortfolio,
+} from '@/persist/portfolioStore'
+import { AssetType, GetterType } from '@/domain/portfolioModel'
+
+/** Let the browser paint React progress between network-bound steps. */
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
+async function withDeadline<T>(
+  ms: number,
+  label: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timeout ${label} (${ms}ms)`)),
+          ms,
+        )
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 export interface IsinCandidate {
   isin: string
@@ -21,7 +58,14 @@ export interface IsinCandidate {
   exch?: string
   quoteType?: string
   score: number
-  sources: Array<'morningstar' | 'boursorama' | 'openfigi' | 'yahoo' | 'proxy'>
+  sources: Array<
+    | 'fortuneo'
+    | 'morningstar'
+    | 'boursorama'
+    | 'openfigi'
+    | 'yahoo'
+    | 'proxy'
+  >
   /** True when listing looks EUR / Europe */
   eurListed?: boolean
 }
@@ -43,6 +87,7 @@ export interface IsinSearchReport {
   debug: IsinSearchDebugStep[]
 }
 
+/** EEA ISIN country codes (PEA-eligible issuers), not only FR. */
 const EUR_ISIN_PREFIX = new Set([
   'FR',
   'DE',
@@ -56,6 +101,21 @@ const EUR_ISIN_PREFIX = new Set([
   'FI',
   'LU',
   'GR',
+  'PL',
+  'SE',
+  'DK',
+  'CZ',
+  'HU',
+  'RO',
+  'SK',
+  'SI',
+  'EE',
+  'LV',
+  'LT',
+  'CY',
+  'MT',
+  'HR',
+  'BG',
 ])
 
 const EUR_EXCHANGES = new Set([
@@ -70,9 +130,35 @@ const EUR_EXCHANGES = new Set([
   'XVIE',
   'XHEL',
   'XDUB',
+  'XWAR',
   'FP',
   'PAR',
   'PA',
+  'GY',
+  'GF',
+  'SM',
+  'NA',
+  'AS',
+])
+
+const EUR_COUNTRIES = new Set([
+  'FRA',
+  'DEU',
+  'NLD',
+  'BEL',
+  'ESP',
+  'ITA',
+  'IRL',
+  'AUT',
+  'PRT',
+  'FIN',
+  'LUX',
+  'POL',
+  'SWE',
+  'DNK',
+  'CZE',
+  'HUN',
+  'GRC',
 ])
 
 function isEurListed(h: {
@@ -87,11 +173,10 @@ function isEurListed(h: {
   const ex = String(h.exchange || h.exch || '').toUpperCase()
   if (EUR_EXCHANGES.has(ex)) return true
   const country = String(h.exchangeCountry || '').toUpperCase()
-  if (['FRA', 'DEU', 'NLD', 'BEL', 'ESP', 'ITA', 'IRL', 'AUT', 'PRT', 'FIN', 'LUX'].includes(country)) {
-    return true
-  }
+  if (EUR_COUNTRIES.has(country)) return true
+  // Yahoo / MIC-style suffixes used on European regulated markets
   const t = String(h.ticker || '').toUpperCase()
-  if (/\.(PA|AS|BR|MC|MI|DE|LS|HE|VI|LS)$/.test(t)) return true
+  if (/\.(PA|AS|BR|MC|MI|DE|F|WA|LS|HE|VI|OL|ST|CO)$/.test(t)) return true
   return false
 }
 
@@ -143,7 +228,7 @@ function pushIsin(
   cur.eurListed = cur.eurListed || eurListed
 }
 
-/** Score a hit — strongly prefer EUR / Euronext listings. */
+/** Score a hit — prefer EEA listings; light bias to Euronext Paris for PEA UX. */
 export function scoreIsinHit(h: IsinSearchHit, name: string): number {
   let score = 10 + Math.min(40, Number(h.score) || 0)
   const eur = isEurListed(h)
@@ -201,10 +286,14 @@ export const AUTO_ISIN_SCORE_MIN = 120
  * Morningstar via Vite dev proxy (browser → localhost → Morningstar).
  * Avoids GAS IP 403. Only available when `npm run dev` proxy is up.
  */
+let morningstarWarmed = false
+
 export async function searchIsinMorningstarLocal(
   query: string,
+  options?: { maxAttempts?: number },
 ): Promise<{ hits: IsinSearchHit[]; debug: IsinSearchDebugStep }> {
   const q = query.trim().slice(0, 80)
+  const maxAttempts = options?.maxAttempts ?? 3
   if (q.length < 2) {
     return {
       hits: [],
@@ -218,18 +307,18 @@ export async function searchIsinMorningstarLocal(
   }
   // Morningstar often returns HTTP 202 + empty body (bot challenge). Retry a few times.
   let lastDetail = ''
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      if (attempt === 1) {
-        // Warm-up cookies via Vite middleware
+      if (!morningstarWarmed) {
         await fetch('/api/morningstar-warmup', {
           signal: AbortSignal.timeout(10000),
         }).catch(() => undefined)
+        morningstarWarmed = true
       }
       const url = `/api/morningstar?q=${encodeURIComponent(q)}`
       const res = await fetch(url, {
         headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(15000),
       })
       const text = await res.text()
       if (!res.ok) {
@@ -238,7 +327,8 @@ export async function searchIsinMorningstarLocal(
       }
       if (!text || !text.trim()) {
         lastDetail = `HTTP ${res.status} corps vide (challenge bot)`
-        await new Promise((r) => setTimeout(r, 400 * attempt))
+        morningstarWarmed = false
+        await new Promise((r) => setTimeout(r, 200 * attempt))
         continue
       }
       let json: {
@@ -318,8 +408,9 @@ export async function searchIsinMorningstarLocal(
 }
 
 /**
- * Search ISIN candidates — Morningstar local (dev proxy) + GAS multi-source.
+ * Search ISIN candidates — Fortuneo Accès Marchés first, then Morningstar / GAS.
  * Prefers EUR listings for the suggested default.
+ * If Fortuneo returns an ISIN, that guess wins and the cascade stops.
  */
 export async function searchIsinCandidates(input: {
   name: string
@@ -327,8 +418,14 @@ export async function searchIsinCandidates(input: {
   onStatus?: (msg: string) => void
   /** Skip Vite Morningstar proxy (force GAS only) */
   skipLocalMorningstar?: boolean
+  /**
+   * Faster path for bulk import / auto-resolve: fewer queries / shorter
+   * timeouts on primary sources. Yahoo→ISIN runs only if no acceptable hit.
+   */
+  batch?: boolean
 }): Promise<IsinSearchReport> {
   const name = input.name.trim()
+  const batch = Boolean(input.batch)
   const map = new Map<string, IsinCandidate>()
   const debug: IsinSearchDebugStep[] = []
   const errors: string[] = []
@@ -341,6 +438,12 @@ export async function searchIsinCandidates(input: {
     const bareTicker = yt.replace(/\.[A-Za-z]{1,4}$/, '')
     if (bareTicker && !queries.includes(bareTicker)) queries.splice(1, 0, bareTicker)
   }
+
+  const localQueryCap = batch ? 2 : 3
+  const gasQueryCap = batch ? 3 : 4
+  const gasTimeoutMs = batch ? 18_000 : 45_000
+  const msAttempts = batch ? 1 : 3
+  const yahooCascadeCap = batch ? 3 : 5
 
   const ingest = (
     hits: IsinSearchHit[],
@@ -368,11 +471,84 @@ export async function searchIsinCandidates(input: {
     }
   }
 
+  const acceptableFromMap = (): IsinCandidate | undefined => {
+    const best = pickBestIsinCandidate([...map.values()])
+    if (!best || best.score < AUTO_ISIN_SCORE_MIN) return undefined
+    return best
+  }
+
+  const finishReport = (): IsinSearchReport => {
+    const candidates = [...map.values()].sort((a, b) => {
+      if (Boolean(a.eurListed) !== Boolean(b.eurListed)) {
+        return a.eurListed ? -1 : 1
+      }
+      if (b.score !== a.score) return b.score - a.score
+      return a.isin.localeCompare(b.isin)
+    })
+    const suggested = pickBestIsinCandidate(candidates)
+    if (suggested) {
+      debug.push({
+        phase: 'suggest',
+        ok: true,
+        detail: `défaut ${suggested.isin} (score=${suggested.score}${suggested.eurListed ? ', EUR' : ''}${suggested.sources.includes('fortuneo') ? ', Fortuneo' : ''})`,
+      })
+    }
+    return {
+      queries,
+      candidates,
+      suggested,
+      debug,
+      error:
+        candidates.length === 0
+          ? errors[0] ||
+            'Aucun ISIN trouvé. En dev, vérifiez le proxy Vite /api/morningstar ; en prod, redéployez le GAS (OpenFIGI+Boursorama).'
+          : undefined,
+    }
+  }
+
+  // 0) Fortuneo Accès Marchés — first guess; stop cascade on hit
+  {
+    const { hits, debug: ftDebug } = await searchFortuneoFirstHit({
+      name,
+      queries,
+      onStatus: input.onStatus,
+    })
+    debug.push(...ftDebug)
+    if (hits.length) {
+      const best = pickBestFortuneoHit(hits, name)
+      for (const h of hits) {
+        const isin = (h.codeIsin || '').toUpperCase()
+        if (!isValidIsin(isin)) continue
+        const yahoo = guessYahooTicker(h)
+        // Broker hit = high confidence (auto-resolve threshold)
+        const base = h === best ? 220 : 180
+        pushIsin(map, {
+          isin,
+          name: h.libelle || name,
+          ticker: yahoo,
+          exch: h.place,
+          quoteType: h.type,
+          score: base,
+          source: 'fortuneo',
+        })
+      }
+      debug.push({
+        phase: 'fortuneo-stop',
+        ok: true,
+        detail: `arrêt cascade — ISIN Fortuneo ${best?.codeIsin || hits[0].codeIsin}`,
+      })
+      return finishReport()
+    }
+  }
+
   // 1) Morningstar via Vite proxy (browser path — works in npm run dev)
   if (!input.skipLocalMorningstar && import.meta.env.DEV) {
-    for (const q of queries.slice(0, 3)) {
+    for (const q of queries.slice(0, localQueryCap)) {
       input.onStatus?.(`Morningstar local « ${q} »…`)
-      const { hits, debug: step } = await searchIsinMorningstarLocal(q)
+      await yieldToUi()
+      const { hits, debug: step } = await searchIsinMorningstarLocal(q, {
+        maxAttempts: msAttempts,
+      })
       debug.push(step)
       if (hits.length) {
         ingest(hits, 'morningstar')
@@ -390,12 +566,15 @@ export async function searchIsinCandidates(input: {
   }
 
   // 2) GAS proxy (Morningstar may 403; OpenFIGI+Boursorama fallback)
-  if (isProxyConfigured()) {
-    for (const q of queries.slice(0, 4)) {
-      if (map.size > 0) break
+  if (!acceptableFromMap() && isProxyConfigured()) {
+    for (const q of queries.slice(0, gasQueryCap)) {
+      if (acceptableFromMap()) break
       input.onStatus?.(`Proxy GAS « ${q} »…`)
+      await yieldToUi()
       try {
-        const detailed = await searchIsinProxyDetailed(q)
+        const detailed = await searchIsinProxyDetailed(q, {
+          timeoutMs: gasTimeoutMs,
+        })
         debug.push({
           phase: 'gas-isinsearch',
           query: q,
@@ -419,17 +598,25 @@ export async function searchIsinCandidates(input: {
         })
       }
     }
-  } else {
+  } else if (!isProxyConfigured()) {
     debug.push({
       phase: 'gas-isinsearch',
       ok: false,
       detail: 'VITE_PROXY_URL non configuré',
     })
+  } else {
+    debug.push({
+      phase: 'gas-isinsearch',
+      ok: true,
+      detail: 'ignoré — ISIN acceptable déjà trouvé',
+    })
   }
 
-  // 3) Yahoo symbols → GAS by bare ticker
-  if (map.size === 0 && isProxyConfigured()) {
-    input.onStatus?.('Yahoo puis ISIN…')
+  // 3) Slow fallback: Yahoo symbol search → resolve each ticker to ISIN via GAS.
+  // Only when faster paths did not yield an acceptable candidate.
+  if (!acceptableFromMap() && isProxyConfigured()) {
+    input.onStatus?.('Fallback Yahoo → ISIN…')
+    await yieldToUi()
     try {
       const yHits = await searchYahoo(name)
       debug.push({
@@ -440,16 +627,24 @@ export async function searchIsinCandidates(input: {
         count: yHits.length,
       })
       const symbols = yHits
-        .map((h) => ({ h, score: scoreYahooHit(h, name) }))
+        .map((h) => {
+          let score = scoreYahooHit(h, name)
+          // Prefer any exchange-qualified symbol over bare OTC tickers
+          if (/\.[A-Za-z]{1,4}$/.test(h.symbol || '')) score += 25
+          return { h, score }
+        })
         .filter((x) => x.score >= 0 && x.h.symbol)
         .sort((a, b) => b.score - a.score)
-        .slice(0, 5)
+        .slice(0, yahooCascadeCap)
       for (const { h } of symbols) {
-        // Pass full Yahoo ticker (IBE.MC) so GAS prefers Madrid FF55- paths
+        if (acceptableFromMap()) break
         const qGas = h.symbol
         input.onStatus?.(`ISIN via ${h.symbol}…`)
+        await yieldToUi()
         try {
-          const detailed = await searchIsinProxyDetailed(qGas)
+          const detailed = await searchIsinProxyDetailed(qGas, {
+            timeoutMs: gasTimeoutMs,
+          })
           debug.push({
             phase: 'gas-via-yahoo',
             query: qGas,
@@ -458,7 +653,6 @@ export async function searchIsinCandidates(input: {
             count: detailed.results.length,
           })
           ingest(detailed.results, 'proxy')
-          if (map.size > 0) break
         } catch (e) {
           debug.push({
             phase: 'gas-via-yahoo',
@@ -475,36 +669,15 @@ export async function searchIsinCandidates(input: {
         detail: e instanceof Error ? e.message : String(e),
       })
     }
-  }
-
-  const candidates = [...map.values()].sort((a, b) => {
-    if (Boolean(a.eurListed) !== Boolean(b.eurListed)) {
-      return a.eurListed ? -1 : 1
-    }
-    if (b.score !== a.score) return b.score - a.score
-    return a.isin.localeCompare(b.isin)
-  })
-  const suggested = pickBestIsinCandidate(candidates)
-
-  if (suggested) {
+  } else if (acceptableFromMap()) {
     debug.push({
-      phase: 'suggest',
+      phase: 'yahoo-search',
       ok: true,
-      detail: `défaut ${suggested.isin} (score=${suggested.score}${suggested.eurListed ? ', EUR' : ''})`,
+      detail: 'ignoré — ISIN acceptable déjà trouvé',
     })
   }
 
-  return {
-    queries,
-    candidates,
-    suggested,
-    debug,
-    error:
-      candidates.length === 0
-        ? errors[0] ||
-          'Aucun ISIN trouvé. En dev, vérifiez le proxy Vite /api/morningstar ; en prod, redéployez le GAS (OpenFIGI+Boursorama).'
-        : undefined,
-  }
+  return finishReport()
 }
 
 export interface AutoIsinResult {
@@ -520,9 +693,13 @@ export interface AutoIsinResult {
   }>
 }
 
+/** Per-title budget in bulk mode (search + scoring). */
+const BATCH_ITEM_DEADLINE_MS = 35_000
+
 /**
  * Auto-resolve LOCAL:… supports to real ISINs (EUR preferred).
  * Only applies when confidence ≥ AUTO_ISIN_SCORE_MIN; otherwise leaves for edit.
+ * Uses a fast batch search path and flushes rekeys in groups so the UI stays responsive.
  */
 export async function autoResolveLocalIsins(
   supports?: Support[],
@@ -537,18 +714,76 @@ export async function autoResolveLocalIsins(
   },
 ): Promise<AutoIsinResult> {
   let list = supports ?? (await listFlatSupports())
-  if (!options?.force) {
-    list = list.filter((s) => isLocalSupportId(s.isin))
-  } else {
-    // force: only LOCAL (never rekey a real ISIN automatically)
-    list = list.filter((s) => isLocalSupportId(s.isin))
-  }
+  list = list.filter((s) => isLocalSupportId(s.isin))
 
   const details: AutoIsinResult['details'] = []
   let updated = 0
   let skipped = 0
   let failed = 0
   const total = list.length
+
+  type PendingRekey = {
+    from: string
+    to: string
+    name: string
+    yahooTicker?: string
+    googleTicker?: string
+    boursoramaTicker?: string
+    manualPrices: Support['manualPrices']
+    staticPrice?: number
+  }
+  const pending: PendingRekey[] = []
+
+  const flushPending = async () => {
+    if (!pending.length) return
+    const batch = pending.splice(0, pending.length)
+    await updatePortfolio((p) => {
+      for (const item of batch) {
+        const source = p.findSupportByKey(item.from)
+        if (!source) continue
+        const isLocal = item.to.startsWith('LOCAL:')
+        let target = p.findSupportByKey(item.to)
+        if (!target) {
+          target = p.upsertSupport({
+            niceUniqueName: item.name || source.niceUniqueName,
+            ISIN: isLocal ? '' : item.to,
+            localKey: isLocal ? item.to : '',
+            assetType: AssetType.ACTIONS,
+            getterType: item.yahooTicker
+              ? GetterType.YAHOO_FINANCE
+              : source.getterType,
+            yahooFinanceTicker:
+              item.yahooTicker ?? source.yahooFinanceTicker,
+            googleFinanceTicker:
+              item.googleTicker ?? source.googleFinanceTicker,
+            boursoramaTicker:
+              item.boursoramaTicker ?? source.boursoramaTicker,
+            staticDatedValues: source.staticDatedValues,
+            lastKnownValue: source.lastKnownValue,
+          })
+        } else {
+          if (item.yahooTicker) target.yahooFinanceTicker = item.yahooTicker
+          if (item.googleTicker) target.googleFinanceTicker = item.googleTicker
+          if (!target.niceUniqueName) target.niceUniqueName = item.name
+        }
+        for (const env of p.envelopes) {
+          for (const op of env.operations) {
+            if (op.supportUniqueID === source.uniqueID) {
+              op.supportUniqueID = target.uniqueID
+              op.customDetails = {
+                ...op.customDetails,
+                isin: item.to,
+                name: target.niceUniqueName,
+              }
+            }
+          }
+        }
+        if (source.uniqueID !== target.uniqueID) {
+          delete p.supports[source.uniqueID]
+        }
+      }
+    })
+  }
 
   for (let i = 0; i < list.length; i++) {
     const s = list[i]
@@ -558,11 +793,25 @@ export async function autoResolveLocalIsins(
       name: s.name,
       status: `ISIN… (${i + 1}/${total})`,
     })
+    await yieldToUi()
     try {
-      const report = await searchIsinCandidates({
-        name: s.name,
-        yahooTicker: s.yahooTicker,
-      })
+      const report = await withDeadline(
+        BATCH_ITEM_DEADLINE_MS,
+        s.name,
+        () =>
+          searchIsinCandidates({
+            name: s.name,
+            yahooTicker: s.yahooTicker,
+            batch: true,
+            onStatus: (msg) =>
+              options?.onProgress?.({
+                current: i + 1,
+                total,
+                name: s.name,
+                status: msg,
+              }),
+          }),
+      )
       const best = report.suggested
       if (!best) {
         failed++
@@ -572,9 +821,7 @@ export async function autoResolveLocalIsins(
           status: 'fail',
           detail: report.error || 'aucun candidat',
         })
-        continue
-      }
-      if (best.score < AUTO_ISIN_SCORE_MIN) {
+      } else if (best.score < AUTO_ISIN_SCORE_MIN) {
         skipped++
         details.push({
           from: s.isin,
@@ -583,27 +830,29 @@ export async function autoResolveLocalIsins(
           status: 'skip',
           detail: `score ${best.score} < ${AUTO_ISIN_SCORE_MIN} — choisir à l’édition`,
         })
-        continue
+      } else {
+        const g = best.ticker
+          ? googleTickerFromYahoo(best.ticker)
+          : undefined
+        pending.push({
+          from: s.isin,
+          to: best.isin,
+          name: s.name,
+          yahooTicker: best.ticker || s.yahooTicker,
+          googleTicker: g ?? s.googleTicker,
+          boursoramaTicker: s.boursoramaTicker,
+          manualPrices: s.manualPrices,
+          staticPrice: s.staticPrice,
+        })
+        updated++
+        details.push({
+          from: s.isin,
+          name: s.name,
+          to: best.isin,
+          status: 'ok',
+          detail: `${best.isin}${best.eurListed ? ' (EUR)' : ''} score=${best.score}`,
+        })
       }
-      const g = best.ticker
-        ? googleTickerFromYahoo(best.ticker)
-        : undefined
-      await rekeySupport(s.isin, best.isin, {
-        name: s.name,
-        yahooTicker: best.ticker || s.yahooTicker,
-        googleTicker: g ?? s.googleTicker,
-        boursoramaTicker: s.boursoramaTicker,
-        manualPrices: s.manualPrices,
-        staticPrice: s.staticPrice,
-      })
-      updated++
-      details.push({
-        from: s.isin,
-        name: s.name,
-        to: best.isin,
-        status: 'ok',
-        detail: `${best.isin}${best.eurListed ? ' (EUR)' : ''} score=${best.score}`,
-      })
     } catch (e) {
       failed++
       details.push({
@@ -613,10 +862,16 @@ export async function autoResolveLocalIsins(
         detail: e instanceof Error ? e.message : String(e),
       })
     }
-    if (i < list.length - 1) {
-      await new Promise((r) => setTimeout(r, 150))
+
+    // Flush every few hits so a crash mid-run keeps partial progress
+    if (pending.length >= 5) {
+      await flushPending()
+      await yieldToUi()
+    } else if (i < list.length - 1) {
+      await new Promise((r) => setTimeout(r, 80))
     }
   }
 
+  await flushPending()
   return { updated, skipped, failed, details }
 }

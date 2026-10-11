@@ -60,9 +60,12 @@ export function attachMissingIsins(
   nameToIsin: Map<string, string>,
 ): Operation[] {
   return ops.map((o, idx) => {
-    if (o.isin || !o.name) return o
+    if (!o.name) return o
     const isin = lookupIsin(o.name, nameToIsin)
     if (!isin) return o
+    // Upgrade LOCAL:… → real ISIN when the open position name matches
+    if (o.isin === isin) return o
+    if (o.isin && !isLocalSupportId(o.isin)) return o
     // Keep original fingerprint (based on name) so re-imports stay idempotent
     // even after ISIN enrichment.
     return {
@@ -99,7 +102,8 @@ export function assignSupportKeys(
 ): Operation[] {
   const withReal = attachMissingIsins(ops, nameToIsin)
   return withReal.map((o, idx) => {
-    if (o.isin) return o
+    if (o.isin && !isLocalSupportId(o.isin)) return o
+    if (o.isin && isLocalSupportId(o.isin)) return o // kept after attachMissingIsins
     if (!o.name) return o
     if (!TRADE_TYPES.has(o.type) && o.quantity === undefined) return o
     const isin = localSupportId(o.name)

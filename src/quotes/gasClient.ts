@@ -122,6 +122,82 @@ export async function fetchHistoryRange(
   }))
 }
 
+/**
+ * Parallel Yahoo history for many tickers (one GAS round-trip, UrlFetchApp.fetchAll).
+ * Falls back to per-ticker calls if the deployment has no `historybulk` yet.
+ */
+export async function fetchHistoryBulk(
+  tickers: string[],
+  period1: string,
+  period2: string,
+): Promise<Map<string, QuoteBar[]>> {
+  const clean = [...new Set(tickers.map(assertSafeTicker))]
+  const out = new Map<string, QuoteBar[]>()
+  if (!clean.length) return out
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(period1) || !/^\d{4}-\d{2}-\d{2}$/.test(period2)) {
+    throw new QuoteProxyError('Plage de dates invalide')
+  }
+
+  const CHUNK = 40
+  for (let i = 0; i < clean.length; i += CHUNK) {
+    const slice = clean.slice(i, i + CHUNK)
+    try {
+      const data = await gasGet<{
+        histories?: Record<string, QuoteBar[]>
+        error?: string
+      }>(
+        {
+          action: 'historybulk',
+          tickers: slice.join(','),
+          period1,
+          period2,
+        },
+        90_000,
+      )
+      for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
+        out.set(
+          ticker,
+          (bars ?? []).map((b) => ({ date: b.date, close: b.close })),
+        )
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // Old GAS deploy without historybulk
+      if (/Action inconnue|historybulk/i.test(msg)) {
+        const settled = await mapPool(slice, 6, async (t) => {
+          const bars = await fetchHistoryRange(t, period1, period2)
+          return [t, bars] as const
+        })
+        for (const [t, bars] of settled) out.set(t, bars)
+        continue
+      }
+      throw e
+    }
+  }
+  return out
+}
+
+/** Run async work over items with a fixed concurrency limit. */
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (next < items.length) {
+        const i = next++
+        results[i] = await fn(items[i], i)
+      }
+    },
+  )
+  await Promise.all(workers)
+  return results
+}
+
 export interface YahooSearchHit {
   symbol: string
   shortname?: string
@@ -162,16 +238,89 @@ export interface OpenFigiMap {
   exchCode?: string
 }
 
-/** Map public ISIN → Yahoo-style ticker via OpenFIGI (PAR → .PA). */
-export async function mapIsinOpenFigi(isin: string): Promise<OpenFigiMap | null> {
+export interface OpenFigiBatchHit {
+  isin: string
+  ticker?: string
+  exchCode?: string
+}
+
+/** True when OpenFIGI exchCode is Euronext Paris or Amsterdam. */
+export function isOpenFigiPaAm(exchCode?: string): boolean {
+  const e = String(exchCode || '').toUpperCase()
+  return (
+    e === 'FP' ||
+    e === 'PAR' ||
+    e === 'PN' ||
+    e === 'PA' ||
+    e === 'NA' ||
+    e === 'AS'
+  )
+}
+
+/**
+ * Map public ISIN → Yahoo-style ticker via OpenFIGI.
+ * `euronextOnly`: only Paris (.PA) / Amsterdam (.AS) — empty if listed elsewhere.
+ */
+export async function mapIsinOpenFigi(
+  isin: string,
+  options?: { euronextOnly?: boolean },
+): Promise<OpenFigiMap | null> {
   const id = isin.trim().toUpperCase()
   if (!/^[A-Z]{2}[A-Z0-9]{10}$/.test(id)) return null
-  const data = await gasGet<{ ticker?: string; exchCode?: string; error?: string }>({
-    action: 'openfigi',
-    q: id,
-  })
+  const params: Record<string, string> = { action: 'openfigi', q: id }
+  if (options?.euronextOnly) params.venues = 'pa-am'
+  const data = await gasGet<{ ticker?: string; exchCode?: string; error?: string }>(
+    params,
+  )
   if (!data.ticker) return null
+  if (options?.euronextOnly && !isOpenFigiPaAm(data.exchCode)) return null
+  // Client-side guard if GAS returns a non-PA/AM yahoo suffix
+  if (
+    options?.euronextOnly &&
+    !data.ticker.endsWith('.PA') &&
+    !data.ticker.endsWith('.AS')
+  ) {
+    return null
+  }
   return { ticker: data.ticker, exchCode: data.exchCode }
+}
+
+/**
+ * Batch ISIN → ticker (Euronext Paris / Amsterdam only).
+ * Chunks of 40 ISINs per GAS call (GAS → OpenFIGI in packs of 10).
+ */
+export async function mapIsinsOpenFigiBatch(
+  isins: string[],
+): Promise<Map<string, OpenFigiMap>> {
+  const unique = [
+    ...new Set(
+      isins
+        .map((x) => x.trim().toUpperCase())
+        .filter((id) => /^[A-Z]{2}[A-Z0-9]{10}$/.test(id)),
+    ),
+  ]
+  const out = new Map<string, OpenFigiMap>()
+  if (!unique.length || !isProxyConfigured()) return out
+
+  const CHUNK = 40
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const slice = unique.slice(i, i + CHUNK)
+    const data = await gasGet<{ results?: OpenFigiBatchHit[] }>(
+      {
+        action: 'openfigibatch',
+        isins: slice.join(','),
+      },
+      60_000,
+    )
+    for (const row of data.results ?? []) {
+      const isin = (row.isin || '').toUpperCase()
+      const ticker = (row.ticker || '').trim()
+      if (!isin || !ticker) continue
+      if (!ticker.endsWith('.PA') && !ticker.endsWith('.AS')) continue
+      out.set(isin, { ticker, exchCode: row.exchCode })
+    }
+  }
+  return out
 }
 
 export interface OpenFigiSearchHit {
@@ -218,6 +367,7 @@ export interface IsinSearchProxyResponse {
  */
 export async function searchIsinProxyDetailed(
   query: string,
+  options?: { timeoutMs?: number },
 ): Promise<IsinSearchProxyResponse> {
   const q = query.trim().slice(0, 80)
   if (q.length < 2) return { results: [] }
@@ -225,10 +375,13 @@ export async function searchIsinProxyDetailed(
     results?: IsinSearchHit[]
     debug?: string | Record<string, unknown>
     error?: string
-  }>({
-    action: 'isinsearch',
-    q,
-  })
+  }>(
+    {
+      action: 'isinsearch',
+      q,
+    },
+    options?.timeoutMs ?? 45_000,
+  )
   const debug =
     typeof data.debug === 'string'
       ? data.debug

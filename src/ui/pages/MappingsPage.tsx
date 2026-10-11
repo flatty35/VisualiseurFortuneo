@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { EnvelopeType, Support } from '@/domain/types'
+import type { EnvelopeType, Operation, Support } from '@/domain/types'
 import { loadProjected } from '@/persist/portfolioStore'
 import {
   isValidIsin,
@@ -9,7 +9,10 @@ import {
 import { buildHoldingsSeries } from '@/engine/positions'
 import { ensureHistoricalSupports } from '@/import/ensureHistoricalSupports'
 import { isLocalSupportId } from '@/import/resolveIsin'
-import { isProxyConfigured } from '@/quotes/gasClient'
+import {
+  fetchBulkPrices,
+  isProxyConfigured,
+} from '@/quotes/gasClient'
 import {
   autoResolveLocalIsins,
   searchIsinCandidates,
@@ -24,6 +27,31 @@ import {
   type TickerCandidate,
 } from '@/quotes/tickerMatch'
 import { useAsyncData } from '@/ui/hooks/useLiveQuery'
+
+function fmtPrice(n: number | undefined | null): string {
+  if (n === undefined || n === null || !Number.isFinite(n)) return '—'
+  return n.toLocaleString('fr-FR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })
+}
+
+function fmtQty(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n)) return '—'
+  return n.toLocaleString('fr-FR', { maximumFractionDigits: 6 })
+}
+
+function lookupLivePrice(
+  prices: Record<string, number>,
+  ticker: string | undefined,
+): number | undefined {
+  if (!ticker) return undefined
+  if (prices[ticker] !== undefined) return prices[ticker]
+  const key = Object.keys(prices).find(
+    (k) => k.toUpperCase() === ticker.toUpperCase(),
+  )
+  return key !== undefined ? prices[key] : undefined
+}
 
 type SearchBoxState<T> = {
   loading: boolean
@@ -105,11 +133,13 @@ export default function MappingsPage() {
         return a.name.localeCompare(b.name, 'fr')
       })
 
-    return rows
+    return { rows, operations }
   }, [])
   const [edit, setEdit] = useState<Support | null>(null)
   /** Key in DB when the editor was opened (for rekey on save). */
   const [editOriginalIsin, setEditOriginalIsin] = useState<string | null>(null)
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({})
+  const [livePricesLoading, setLivePricesLoading] = useState(false)
 
   const toSupport = (s: SupportRow | Support): Support => ({
     isin: s.isin,
@@ -141,8 +171,42 @@ export default function MappingsPage() {
     useState<SearchBoxState<IsinCandidate>>(emptySearch)
   const [saving, setSaving] = useState(false)
 
-  const rows = data ?? []
+  const rows = data?.rows ?? []
+  const allOperations = data?.operations ?? []
   const allIsins = useMemo(() => rows.map((s) => s.isin), [rows])
+
+  /** Ops for the support being edited (original key + current key). */
+  const editOps = useMemo(() => {
+    if (!edit || !editOriginalIsin) return [] as Operation[]
+    const keys = new Set(
+      [editOriginalIsin, edit.isin]
+        .filter(Boolean)
+        .map((k) => normalizeSupportKey(k)),
+    )
+    return allOperations
+      .filter(
+        (o) =>
+          o.isin &&
+          keys.has(normalizeSupportKey(o.isin)) &&
+          !o.synthetic,
+      )
+      .sort(
+        (a, b) =>
+          b.date.localeCompare(a.date) || a.id.localeCompare(b.id),
+      )
+  }, [edit, editOriginalIsin, allOperations])
+
+  const editPriceHints = useMemo(() => {
+    const priced = editOps.filter(
+      (o) => o.price !== undefined && Number.isFinite(o.price) && o.price > 0,
+    )
+    const buys = priced.filter((o) => o.type === 'ACHAT' || o.type === 'SCRIPT')
+    const sells = priced.filter((o) => o.type === 'VENTE' || o.type === 'RACHAT')
+    const last = priced[0]
+    const lastBuy = buys[0]
+    const lastSell = sells[0]
+    return { last, lastBuy, lastSell, count: priced.length }
+  }, [editOps])
 
   // Drop selections that no longer exist after reload
   useEffect(() => {
@@ -157,6 +221,7 @@ export default function MappingsPage() {
     if (!editOriginalIsin) return
     setTickerSearch(emptySearch())
     setIsinSearch(emptySearch())
+    setLivePrices({})
     editPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     const t = window.setTimeout(() => {
       yahooInputRef.current?.focus()
@@ -164,6 +229,42 @@ export default function MappingsPage() {
     }, 50)
     return () => window.clearTimeout(t)
   }, [editOriginalIsin])
+
+  // Live prices for ticker candidates + current Yahoo ticker + ISIN candidate tickers
+  const tickersForPrices = useMemo(() => {
+    const set = new Set<string>()
+    if (edit?.yahooTicker) set.add(edit.yahooTicker.trim())
+    for (const c of tickerSearch.candidates) {
+      if (c.symbol) set.add(c.symbol)
+    }
+    for (const c of isinSearch.candidates) {
+      if (c.ticker) set.add(c.ticker)
+    }
+    return [...set]
+  }, [edit?.yahooTicker, tickerSearch.candidates, isinSearch.candidates])
+
+  useEffect(() => {
+    if (!tickersForPrices.length || !isProxyConfigured()) {
+      setLivePrices({})
+      setLivePricesLoading(false)
+      return
+    }
+    let cancelled = false
+    setLivePricesLoading(true)
+    fetchBulkPrices(tickersForPrices)
+      .then((prices) => {
+        if (!cancelled) setLivePrices(prices)
+      })
+      .catch(() => {
+        if (!cancelled) setLivePrices({})
+      })
+      .finally(() => {
+        if (!cancelled) setLivePricesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tickersForPrices.join('|')])
 
   const runTickerSearch = async () => {
     if (!edit) return
@@ -297,7 +398,13 @@ export default function MappingsPage() {
     try {
       const isinR = await autoResolveLocalIsins(undefined, {
         onProgress: (info) =>
-          setMatchProgress(`ISIN ${info.current}/${info.total} — ${info.name}`),
+          setMatchProgress(
+            `ISIN ${info.current}/${info.total} — ${info.name}${
+              info.status && !info.status.startsWith('ISIN')
+                ? ` · ${info.status}`
+                : ''
+            }`,
+          ),
       })
       const r = await autoMatchSupports(undefined, {
         onProgress: (info) => setMatchProgress(`${info.status} — ${info.name}`),
@@ -322,7 +429,13 @@ export default function MappingsPage() {
     try {
       const r = await autoResolveLocalIsins(undefined, {
         onProgress: (info) =>
-          setMatchProgress(`ISIN ${info.current}/${info.total} — ${info.name}`),
+          setMatchProgress(
+            `ISIN ${info.current}/${info.total} — ${info.name}${
+              info.status && !info.status.startsWith('ISIN')
+                ? ` · ${info.status}`
+                : ''
+            }`,
+          ),
       })
       setMsg(
         `ISIN (LOCAL→réel, préférence EUR) : ${r.updated} appliqués · ${r.skipped} à choisir à l’édition · ${r.failed} non trouvés`,
@@ -600,6 +713,117 @@ export default function MappingsPage() {
             </span>
           </h2>
 
+          <div style={{ marginBottom: '1.25rem' }}>
+            <h3 style={{ margin: '0 0 0.35rem', fontSize: '1rem' }}>
+              Opérations connues
+              {editOps.length > 0 && (
+                <span className="muted" style={{ fontWeight: 400 }}>
+                  {' '}
+                  ({editOps.length})
+                </span>
+              )}
+            </h3>
+            <p className="muted" style={{ margin: '0 0 8px', fontSize: '0.85rem' }}>
+              Prix Fortuneo pour caler ISIN / ticker
+              {editPriceHints.lastBuy && (
+                <>
+                  {' '}
+                  · dernier achat{' '}
+                  <strong style={{ color: 'var(--text)' }}>
+                    {fmtPrice(editPriceHints.lastBuy.price)} €
+                  </strong>{' '}
+                  ({editPriceHints.lastBuy.date})
+                </>
+              )}
+              {editPriceHints.lastSell && (
+                <>
+                  {' '}
+                  · dernière vente{' '}
+                  <strong style={{ color: 'var(--text)' }}>
+                    {fmtPrice(editPriceHints.lastSell.price)} €
+                  </strong>{' '}
+                  ({editPriceHints.lastSell.date})
+                </>
+              )}
+              {!editPriceHints.count && editOps.length > 0 && (
+                <> · aucun prix unitaire dans l’historique</>
+              )}
+            </p>
+            {editOps.length === 0 ? (
+              <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+                Aucune opération rattachée à cette clé.
+              </p>
+            ) : (
+              <div
+                style={{
+                  maxHeight: 200,
+                  overflowY: 'auto',
+                  border: '1px solid rgba(232,240,235,0.12)',
+                  borderRadius: 10,
+                  background: 'rgba(0,0,0,0.2)',
+                }}
+              >
+                <table className="data" style={{ margin: 0 }}>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Type</th>
+                      <th>Qté</th>
+                      <th>Prix</th>
+                      <th>Montant</th>
+                      <th>Env.</th>
+                      <th>Libellé</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {editOps.map((o) => (
+                      <tr key={o.id}>
+                        <td>
+                          <code style={{ fontSize: '0.8rem' }}>{o.date}</code>
+                        </td>
+                        <td>{o.type}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtQty(o.quantity)}</td>
+                        <td
+                          style={{
+                            textAlign: 'right',
+                            fontWeight:
+                              o.price !== undefined && o.price > 0 ? 600 : 400,
+                          }}
+                        >
+                          {o.price !== undefined && o.price > 0
+                            ? `${fmtPrice(o.price)} €`
+                            : '—'}
+                        </td>
+                        <td
+                          className="muted"
+                          style={{ textAlign: 'right', fontSize: '0.8rem' }}
+                        >
+                          {o.netAmount !== undefined
+                            ? `${fmtPrice(o.netAmount)} €`
+                            : o.grossAmount !== undefined
+                              ? `${fmtPrice(o.grossAmount)} €`
+                              : '—'}
+                        </td>
+                        <td className="muted" style={{ fontSize: '0.75rem' }}>
+                          {o.envelope}
+                        </td>
+                        <td
+                          className="muted"
+                          style={{ fontSize: '0.75rem' }}
+                          title={o.label}
+                        >
+                          {o.label.length > 36
+                            ? o.label.slice(0, 36) + '…'
+                            : o.label}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           <div style={{ marginBottom: '1rem' }}>
             <label>
               <span className="muted">
@@ -717,6 +941,7 @@ export default function MappingsPage() {
                       <th>ISIN</th>
                       <th>Nom</th>
                       <th>Ticker</th>
+                      <th>Cours</th>
                       <th>Place</th>
                       <th>Source</th>
                       <th></th>
@@ -729,6 +954,7 @@ export default function MappingsPage() {
                       const isSuggested =
                         isinSearch.suggested?.isin === c.isin
                       const label = c.name || '—'
+                      const live = lookupLivePrice(livePrices, c.ticker)
                       return (
                         <tr
                           key={c.isin}
@@ -758,6 +984,15 @@ export default function MappingsPage() {
                           </td>
                           <td>
                             <code>{c.ticker || '—'}</code>
+                          </td>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            {c.ticker
+                              ? live !== undefined
+                                ? `${fmtPrice(live)} €`
+                                : livePricesLoading
+                                  ? '…'
+                                  : '—'
+                              : '—'}
                           </td>
                           <td className="muted" style={{ fontSize: '0.75rem' }}>
                             {c.exch || (c.eurListed ? 'EUR' : '—')}
@@ -789,7 +1024,21 @@ export default function MappingsPage() {
           <div className="grid-2">
             <div>
               <label>
-                <span className="muted">Ticker Yahoo</span>
+                <span className="muted">
+                  Ticker Yahoo
+                  {edit.yahooTicker && (
+                    <>
+                      {' '}
+                      · cours{' '}
+                      {(() => {
+                        const p = lookupLivePrice(livePrices, edit.yahooTicker)
+                        if (p !== undefined) return `${fmtPrice(p)} €`
+                        if (livePricesLoading) return '…'
+                        return isProxyConfigured() ? 'n/d' : 'proxy off'
+                      })()}
+                    </>
+                  )}
+                </span>
                 <br />
                 <input
                   ref={yahooInputRef}
@@ -859,6 +1108,7 @@ export default function MappingsPage() {
                     <thead>
                       <tr>
                         <th>Ticker</th>
+                        <th>Cours</th>
                         <th>Nom</th>
                         <th>Type</th>
                         <th>Source</th>
@@ -872,13 +1122,23 @@ export default function MappingsPage() {
                           c.symbol.toUpperCase()
                         const label =
                           c.longname || c.shortname || '—'
+                        const live = lookupLivePrice(livePrices, c.symbol)
+                        const nearOp =
+                          live !== undefined &&
+                          editPriceHints.last &&
+                          editPriceHints.last.price &&
+                          Math.abs(
+                            live / editPriceHints.last.price! - 1,
+                          ) < 0.35
                         return (
                           <tr
                             key={c.symbol}
                             style={
                               selectedYahoo
                                 ? { background: 'rgba(196, 163, 90, 0.12)' }
-                                : undefined
+                                : nearOp
+                                  ? { background: 'rgba(80, 160, 120, 0.12)' }
+                                  : undefined
                             }
                           >
                             <td>
@@ -892,9 +1152,27 @@ export default function MappingsPage() {
                                 </span>
                               )}
                             </td>
+                            <td
+                              style={{
+                                textAlign: 'right',
+                                whiteSpace: 'nowrap',
+                                fontWeight: nearOp ? 600 : 400,
+                              }}
+                              title={
+                                nearOp && editPriceHints.last?.price
+                                  ? `Proche du dernier prix op (${fmtPrice(editPriceHints.last.price)} €)`
+                                  : undefined
+                              }
+                            >
+                              {live !== undefined
+                                ? `${fmtPrice(live)} €`
+                                : livePricesLoading
+                                  ? '…'
+                                  : '—'}
+                            </td>
                             <td title={label}>
-                              {label.length > 42
-                                ? label.slice(0, 42) + '…'
+                              {label.length > 36
+                                ? label.slice(0, 36) + '…'
                                 : label}
                             </td>
                             <td className="muted">
@@ -919,6 +1197,14 @@ export default function MappingsPage() {
                   </table>
                 </div>
               )}
+              {tickerSearch.candidates.length > 0 &&
+                editPriceHints.last?.price && (
+                  <p className="muted" style={{ marginTop: 6, fontSize: '0.8rem' }}>
+                    Surbrillance verte ≈ cours Yahoo proche du dernier prix op (
+                    {fmtPrice(editPriceHints.last.price)} €)
+                    {livePricesLoading ? ' · chargement des cours…' : ''}
+                  </p>
+                )}
               {!tickerSearch.loading &&
                 tickerSearch.queries.length > 0 &&
                 tickerSearch.candidates.length === 0 &&

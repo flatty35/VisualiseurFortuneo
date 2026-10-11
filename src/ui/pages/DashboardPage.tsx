@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import type { EnvelopeType } from '@/domain/types'
 import { loadProjected } from '@/persist/portfolioStore'
 import { buildHoldingsSeries } from '@/engine/positions'
+import { computePortfolioTri } from '@/engine/tri'
 import { valueHoldingsSeries } from '@/engine/valuation'
 import { getAllQuoteMaps } from '@/quotes/localQuoteCache'
 import { isProxyConfigured } from '@/quotes/gasClient'
@@ -11,6 +12,13 @@ const ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO']
 
 function fmtEur(n: number): string {
   return n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+}
+
+function fmtTriPct(irr: number): string {
+  return `${(irr * 100).toLocaleString('fr-FR', {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 1,
+  })} %`
 }
 
 export default function DashboardPage() {
@@ -26,12 +34,25 @@ export default function DashboardPage() {
         return { type, empty: true as const }
       }
       const holdings = buildHoldingsSeries({ envelope: type, operations: ops, virtualOpening: vo })
-      const valued = valueHoldingsSeries({ holdings, supports, quotes })
+      const valued = valueHoldingsSeries({
+        holdings,
+        supports,
+        quotes,
+        operations: ops,
+      })
       const last = valued[valued.length - 1]
       const first = valued[0]
-      const perf =
-        first && last && first.total !== 0
-          ? ((last.total - first.total) / Math.abs(first.total)) * 100
+      const tri =
+        first && last
+          ? computePortfolioTri({
+              envelope: type,
+              operations: ops,
+              supports,
+              quotes,
+              t0: first.date,
+              t1: last.date,
+              virtualOpening: vo,
+            })
           : null
       return {
         type,
@@ -41,8 +62,8 @@ export default function DashboardPage() {
         cash: last?.cash ?? 0,
         securities: last?.securities ?? 0,
         opsCount: ops.filter((o) => !o.synthetic).length,
-        perf,
-        from: vo?.date,
+        irr: tri?.irr ?? null,
+        from: first?.date ?? vo?.date,
       }
     })
 
@@ -96,12 +117,16 @@ export default function DashboardPage() {
               </div>
               <div className="muted" style={{ fontSize: '0.8rem', marginTop: 6 }}>
                 {c.opsCount} ops
-                {c.perf !== null && (
+                {c.irr !== null && (
                   <>
                     {' '}
-                    · perf hist.{' '}
-                    <span style={{ color: c.perf >= 0 ? 'var(--ok)' : 'var(--danger)' }}>
-                      {c.perf.toFixed(1)}%
+                    · TRI{' '}
+                    <span
+                      style={{
+                        color: c.irr >= 0 ? 'var(--ok)' : 'var(--danger)',
+                      }}
+                    >
+                      {fmtTriPct(c.irr)}
                     </span>
                   </>
                 )}

@@ -69,7 +69,13 @@ export interface VirtualOpeningPosition {
 export interface VirtualOpening {
   envelope: EnvelopeType
   date: string
+  /** Opening cash for holdings replay (titres-only: usually 0). */
   cash: number
+  /**
+   * Idle cash today (from positions / import). Shown on the last chart day
+   * only — not projected backward as a cumulative pocket.
+   */
+  reportedCash?: number
   positions: VirtualOpeningPosition[]
   computedAt: string
 }
@@ -98,7 +104,7 @@ export interface UiPrefs {
   defaultPeriod?: ChartPeriod
 }
 
-export type ChartPeriod = '1M' | '3M' | '1Y' | '3Y' | '10Y' | 'MAX'
+export type ChartPeriod = '1M' | '3M' | '1Y' | '2Y'
 
 export const SCHEMA_VERSION = 2
 export const APP_NAME = 'VisualiseurFortuneo'

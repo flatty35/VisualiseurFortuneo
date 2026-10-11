@@ -100,8 +100,9 @@ export function domainOpToFlat(
     type: legacy,
     isin: isin || undefined,
     name,
-    quantity: op.quantity || undefined,
-    price: op.executionPrice || undefined,
+    quantity: Number.isFinite(op.quantity) ? op.quantity : undefined,
+    // Keep 0 € (actions gratuites) — `|| undefined` would drop it
+    price: Number.isFinite(op.executionPrice) ? op.executionPrice : undefined,
     grossAmount:
       typeof op.customDetails.grossAmount === 'number'
         ? op.customDetails.grossAmount
@@ -200,11 +201,16 @@ export function virtualOpeningFromEnvelope(
   const cashSeed = seeds.find((o) => o.supportUniqueID === 0)
   const date =
     seeds.map((o) => o.date).sort()[0] ?? new Date().toISOString().slice(0, 10)
+  const reported =
+    typeof env.customState.currentCash === 'number'
+      ? env.customState.currentCash
+      : undefined
 
   return {
     envelope,
     date,
     cash: cashSeed?.amount ?? 0,
+    reportedCash: reported,
     positions,
     computedAt: env.updatedAt,
   }
@@ -322,6 +328,9 @@ export function applyVirtualOpeningSeeds(
   )
   env.customState.virtualOpeningCash = vo.cash
   env.customState.virtualOpeningDate = vo.date
+  if (vo.reportedCash !== undefined) {
+    env.customState.currentCash = vo.reportedCash
+  }
   env.updatedAt = new Date().toISOString()
 }
 

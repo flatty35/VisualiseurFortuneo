@@ -91,6 +91,8 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
     const name = stripIsinFromName(label || operation)
 
     const assetName = name || undefined
+    // Fingerprint keeps the historical key (name-first). Stored label prefers the
+    // Opération text so amortissement / OST wording remains available later.
     const fingerprint = operationFingerprint({
       envelope,
       date,
@@ -102,6 +104,11 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
       netAmount: net,
       label: label || operation,
     })
+    const storedLabel = operation?.trim()
+      ? label?.trim()
+        ? `${operation.trim()} · ${label.trim()}`
+        : operation.trim()
+      : label || operation
 
     ops.push({
       id: makeOperationId(fingerprint, i++),
@@ -117,7 +124,7 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
       fees,
       netAmount: net,
       currency,
-      label: label || operation,
+      label: storedLabel,
     })
   }
 

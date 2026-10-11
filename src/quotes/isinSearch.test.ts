@@ -51,4 +51,17 @@ describe('ISIN EUR preference', () => {
     ]
     expect(pickBestIsinCandidate(candidates)?.isin).toBe('FR0013341781')
   })
+
+  it('treats EEA ISIN prefixes (e.g. PL) as EUR-eligible', () => {
+    const pl = scoreIsinHit(
+      {
+        isin: 'PLKGHM000017',
+        name: 'KGHM Polska Miedz',
+        investmentType: 'EQ',
+        score: 30,
+      },
+      'KGHM POLSKA MIEDZ',
+    )
+    expect(pl).toBeGreaterThanOrEqual(120)
+  })
 })

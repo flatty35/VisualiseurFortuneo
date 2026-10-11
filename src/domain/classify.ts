@@ -5,11 +5,36 @@ export function classifyTitresOperation(operation: string, label: string): Opera
   const op = normalize(operation)
   const lib = normalize(label)
 
+  // Fortuneo cancellations: « ANNUL. SCRIPT-PARTS SICAV EXTERNE » undoes a buy.
+  // Must run before the plain SCRIPT / ACHAT matches.
+  if (op.includes('annul')) {
+    if (
+      op.includes('script') ||
+      op.includes('achat') ||
+      lib.includes('script')
+    ) {
+      return 'RACHAT'
+    }
+    if (op.includes('rachat') || op.includes('vente') || lib.includes('rachat')) {
+      return 'SCRIPT'
+    }
+  }
+
+  // « RACHAT » contains the substring « achat » — test rachat BEFORE achat.
+  if (op.includes('rachat') || lib.includes('rachat')) return 'RACHAT'
+  if (op.includes('script') || lib.includes('script')) return 'SCRIPT'
   if (op.includes('achat') || lib.startsWith('achat ')) return 'ACHAT'
   if (op.includes('vente') || lib.startsWith('vente ')) return 'VENTE'
-  if (op.includes('script') || lib.includes('script')) return 'SCRIPT'
-  if (op.includes('rachat') || lib.includes('rachat')) return 'RACHAT'
 
+  // BPI / FCPR: « Détachement coupon amortissement » = détachement + encaissement
+  // combinés (remboursement de capital). Ordinary « optionnel » stays DETACHEMENT
+  // (followed by a separate Encaissement line).
+  if (
+    (op.includes('detachement') || lib.includes('detachement')) &&
+    (op.includes('amortissement') || lib.includes('amortissement'))
+  ) {
+    return 'DIVIDENDE'
+  }
   if (op.includes('detachement') || lib.includes('detachement')) return 'DETACHEMENT'
   if (
     op.includes('encaissement') ||
@@ -20,10 +45,15 @@ export function classifyTitresOperation(operation: string, label: string): Opera
     return 'DIVIDENDE'
   }
 
+  // Fortuneo: « OST de création … Attribution automatique » (ex. Air Liquide).
+  // Must run before the generic OST_* catch-all (operation starts with « OST »).
   if (
     lib.includes('action gratuite') ||
     lib.includes('actions gratuites') ||
     lib.includes('attribution') ||
+    op.includes('action gratuite') ||
+    op.includes('actions gratuites') ||
+    op.includes('attribution') ||
     op.includes('gratuite')
   ) {
     return 'ACTIONS_GRATUITES'
@@ -47,8 +77,23 @@ export function classifyTitresOperation(operation: string, label: string): Opera
 
 export function classifyCashLabel(label: string): OperationType {
   const lib = normalize(label)
-  if (lib.includes('versement')) return 'VERSEMENT'
-  if (lib.includes('retrait') || lib.includes('arbitrage')) return 'RETRAIT'
+  if (
+    lib.includes('versement') ||
+    lib.includes('apport') ||
+    lib.includes('alimentation') ||
+    (lib.includes('virement') &&
+      !lib.includes('achat') &&
+      !lib.includes('vente'))
+  ) {
+    return 'VERSEMENT'
+  }
+  if (
+    lib.includes('retrait') ||
+    lib.includes('arbitrage') ||
+    lib.includes('sortie de fonds')
+  ) {
+    return 'RETRAIT'
+  }
   if (lib.includes('dividende') || lib.includes('coupon') || lib.includes('encaissement')) {
     return 'DIVIDENDE'
   }

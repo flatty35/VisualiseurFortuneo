@@ -16,10 +16,22 @@ export default function PrivacyPage() {
         </ul>
         <h2>Seul trafic réseau éventuel</h2>
         <p className="muted">
-          Un proxy Google Apps Script optionnel peut être configuré pour récupérer des{' '}
-          <strong>cours de marché publics</strong>. Le client n’y envoie que des{' '}
-          <code>tickers</code> Yahoo et des plages de dates — jamais votre portefeuille.
+          Des appels optionnels partent uniquement pour des{' '}
+          <strong>identifiants de marché publics</strong> — jamais quantités, montants,
+          PRU, opérations ni valorisations. Le proxy GAS rejette d’ailleurs les
+          paramètres <code>quantity</code> / <code>qty</code> / <code>amount</code> /{' '}
+          <code>pru</code>.
         </p>
+        <ul className="muted">
+          <li>
+            <strong>Cours</strong> (proxy GAS) : tickers Yahoo + plages de dates
+          </li>
+          <li>
+            <strong>Correspondances</strong> (GAS / Fortuneo / Morningstar en dev) :
+            libellé ou ISIN en texte libre pour retrouver un ticker — cela révèle
+            quels titres vous mappez, pas combien vous en détenez
+          </li>
+        </ul>
         <h2>Multi-utilisateur</h2>
         <p className="muted">
           Chaque personne utilise son propre navigateur. Il n’y a pas de compte ni de sync

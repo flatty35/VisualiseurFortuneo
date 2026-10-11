@@ -36,4 +36,17 @@ describe('assignSupportKeys', () => {
     )
     expect(isLocalSupportId(carrefour[0].isin!)).toBe(true)
   })
+
+  it('upgrades LOCAL keys to real ISIN when an open position name matches', () => {
+    const ops = parseTitresText(SAMPLE_NO_ISIN, 'PEA').map((o) =>
+      o.name === 'SAFRAN' ? { ...o, isin: localSupportId('SAFRAN') } : o,
+    )
+    const map = buildNameToIsin(
+      [{ isin: 'FR0000073272', name: 'SAFRAN', quantity: 2 }],
+      [],
+    )
+    const keyed = assignSupportKeys(ops, map)
+    const safran = keyed.filter((o) => o.name === 'SAFRAN')
+    expect(safran.every((o) => o.isin === 'FR0000073272')).toBe(true)
+  })
 })

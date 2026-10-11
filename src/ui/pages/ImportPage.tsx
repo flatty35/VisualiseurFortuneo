@@ -1,13 +1,15 @@
 import { useState } from 'react'
 import type { EnvelopeType, ImportReport } from '@/domain/types'
 import { parseTitresCsv } from '@/import/fortuneoTitres'
-import { parseEspecesCsv } from '@/import/fortuneoEspeces'
 import { parsePositionsFile } from '@/import/positionsXls'
 import { mergeImport } from '@/import/merge'
 import { autoResolveLocalIsins } from '@/quotes/isinSearch'
 import { autoMatchSupports } from '@/quotes/tickerMatch'
 import { isProxyConfigured } from '@/quotes/gasClient'
-import { listFlatSupports } from '@/persist/portfolioStore'
+import {
+  clearEnvelopeOperations,
+  listFlatSupports,
+} from '@/persist/portfolioStore'
 
 const ENVELOPES: { value: EnvelopeType; label: string }[] = [
   { value: 'PEA', label: 'PEA' },
@@ -18,7 +20,6 @@ const ENVELOPES: { value: EnvelopeType; label: string }[] = [
 export default function ImportPage() {
   const [envelope, setEnvelope] = useState<EnvelopeType>('PEA')
   const [titres, setTitres] = useState<File | null>(null)
-  const [especes, setEspeces] = useState<File | null>(null)
   const [positions, setPositions] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState<ImportReport | null>(null)
@@ -26,28 +27,50 @@ export default function ImportPage() {
   const [cashOverride, setCashOverride] = useState('')
   const [progress, setProgress] = useState<string | null>(null)
   const [progressPct, setProgressPct] = useState(0)
+  const [resetMsg, setResetMsg] = useState<string | null>(null)
+
+  const onResetEnvelope = async () => {
+    setError(null)
+    setResetMsg(null)
+    const label =
+      ENVELOPES.find((e) => e.value === envelope)?.label ?? envelope
+    if (
+      !confirm(
+        `Effacer toutes les opérations de l’enveloppe ${label} ?\n\nLes correspondances (tickers) sont conservées. Vous pourrez réimporter l’historique ensuite.`,
+      )
+    ) {
+      return
+    }
+    try {
+      const { removed } = await clearEnvelopeOperations(envelope)
+      setResetMsg(
+        `${label} : ${removed} opération(s) effacée(s). Correspondances inchangées.`,
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const onImport = async () => {
     setError(null)
     setReport(null)
     setProgress(null)
     setProgressPct(0)
-    if (!titres || !especes || !positions) {
-      setError('Les 3 fichiers sont requis : titres, espèces, positions ouvertes.')
+    if (!titres || !positions) {
+      setError('Historique titres et positions ouvertes sont requis.')
       return
     }
     setBusy(true)
     try {
       setProgress('Lecture des fichiers…')
       setProgressPct(8)
-      const [titresOps, especesOps, pos] = await Promise.all([
+      const [titresOps, pos] = await Promise.all([
         parseTitresCsv(titres, envelope),
-        parseEspecesCsv(especes, envelope),
         parsePositionsFile(positions),
       ])
 
       setProgress(
-        `Fichiers lus — ${titresOps.length} ops titres, ${especesOps.length} versements/retraits, ${pos.length} positions`,
+        `Fichiers lus — ${titresOps.length} ops titres, ${pos.length} positions`,
       )
       setProgressPct(25)
 
@@ -62,7 +85,6 @@ export default function ImportPage() {
       const r = await mergeImport({
         envelope,
         titresOps,
-        especesOps,
         positions: pos,
         currentCash,
       })
@@ -72,7 +94,13 @@ export default function ImportPage() {
       if (isProxyConfigured() || import.meta.env.DEV) {
         const isinR = await autoResolveLocalIsins(undefined, {
           onProgress: (info) => {
-            setProgress(`ISIN ${info.current}/${info.total} — ${info.name}`)
+            setProgress(
+              `ISIN ${info.current}/${info.total} — ${info.name}${
+                info.status && !info.status.startsWith('ISIN')
+                  ? ` · ${info.status}`
+                  : ''
+              }`,
+            )
             setProgressPct(
               50 + Math.round((info.current / Math.max(info.total, 1)) * 15),
             )
@@ -119,9 +147,10 @@ export default function ImportPage() {
       <section className="panel">
         <h1 style={{ marginTop: 0 }}>Import Fortuneo</h1>
         <p className="muted">
-          Fournir l’historique titres, l’historique espèces et l’export des positions ouvertes
-          (CSV, XLS, ou ZIP contenant un CSV). Un réimport n’ajoute que les opérations encore
-          inconnues (merge par empreinte).
+          Historique titres + positions ouvertes (CSV, XLS ou ZIP). Pas de fichier
+          espèces : chaque achat est un apport (argent investi ce jour-là), sans
+          poche cash cumulative. Le solde espèces saisi n’apparaît qu’en fin de
+          période. Un réimport n’ajoute que les opérations encore inconnues.
         </p>
 
         <label style={{ display: 'block', marginBottom: '1rem' }}>
@@ -142,7 +171,6 @@ export default function ImportPage() {
 
         <div className="grid-2">
           <FileField label="Historique titres (CSV / ZIP)" file={titres} onChange={setTitres} />
-          <FileField label="Historique espèces (CSV / ZIP)" file={especes} onChange={setEspeces} />
           <FileField
             label="Positions ouvertes (XLS / CSV / ZIP)"
             file={positions}
@@ -151,7 +179,7 @@ export default function ImportPage() {
           />
           <label>
             <span className="muted">
-              Espèces actuelles (€) — optionnel si absentes du fichier positions
+              Espèces actuelles (€) — solde cash du compte (positions ou saisie)
             </span>
             <br />
             <input
@@ -201,6 +229,31 @@ export default function ImportPage() {
         )}
 
         {error && <p style={{ color: 'var(--danger)', marginTop: '1rem' }}>{error}</p>}
+        {resetMsg && (
+          <p className="muted" style={{ marginTop: '1rem' }}>
+            {resetMsg}
+          </p>
+        )}
+
+        <div
+          style={{
+            marginTop: '2rem',
+            paddingTop: '1.25rem',
+            borderTop: '1px solid var(--border, rgba(255,255,255,0.12))',
+          }}
+        >
+          <h2 style={{ margin: '0 0 0.5rem', fontSize: '1.05rem' }}>
+            Réinitialiser l’enveloppe
+          </h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Efface les opérations et l’ouverture virtuelle de{' '}
+            <strong>{ENVELOPES.find((e) => e.value === envelope)?.label}</strong>{' '}
+            uniquement. Les correspondances (page Correspondances) restent.
+          </p>
+          <button type="button" className="btn" onClick={onResetEnvelope} disabled={busy}>
+            Vider les opérations ({ENVELOPES.find((e) => e.value === envelope)?.label})
+          </button>
+        </div>
 
         {report && (
           <div style={{ marginTop: '1.25rem' }}>

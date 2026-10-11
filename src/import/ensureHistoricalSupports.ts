@@ -1,4 +1,4 @@
-import type { Operation, Support } from '@/domain/types'
+import type { Operation } from '@/domain/types'
 import { AssetType } from '@/domain/portfolioModel'
 import { projectPortfolio } from '@/domain/flatAdapters'
 import { loadPortfolio, savePortfolio } from '@/persist/portfolioStore'

@@ -39,12 +39,13 @@ export function valuationFromPortfolio(input: {
     from: input.from,
     to: input.to,
   })
-  const { supports } = projectPortfolio(input.portfolio)
+  const { supports, operations } = projectPortfolio(input.portfolio)
   return valueHoldingsSeries({
     holdings,
     supports,
     quotes: input.quotes,
     isinFilter: input.isinFilter,
+    operations: operations.filter((o) => o.envelope === input.envelope),
   })
 }
 

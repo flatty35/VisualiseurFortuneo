@@ -1,0 +1,26 @@
+But principal : Je veux réaliser un site web qui permette de consulter l'évolution de ses positions en PEA / CTO en important des fichiers d'historique Fortuneo : 
+Le site web sera capable :
+- d'importer son portefeuille fortuneo (PEA, PEA-PME et CTO en priorité), en gardant les diverses opérations sur les titres (détachement et versement de dividendes, distribution d'actions gratuites, augmentation de capital, et les autres opérations etc)
+- de consulter l'évolution de son portefeuille sous forme de graphiques, qui permettent de tracer des lignes pleines ou pointillées, avec des petits triangles verts vers le haut, et rouges vers le bas, qui permettent de voir les entrées et sorties de positions. On doit pouvoir comparer les différentes courbes sur une échelle cohérente (par exemple fixer l'ouverture initiale comme la base 100, mais tout autre proposition sera étudiée). des raccourcis permettent d'afficher sur 1 mois, 3 mois, 1 an, 3 ans, 10 ans, ou sur l'historique maximum disponible (depuis l'ouverture du compte / PEA ou la premiere date ou toutes les valeurs sont connues).
+- de calculer un TRI du portefeuille ou d'une position sur une durée spécifique (en simulant l'achat des positions en cours au début de la période et leur revente en fin de période, sans considération de frais d'ordre)
+- Attention, toutes les données personnelles (valeur de chaque position, quantité de parts de chaque action, etc) devront rester UNIQUEMENT en local dans le cache du navigateur.
+- une fonction devra permettre d'exporter / importer le portefeuille dans l'état actuel (afin de pouvoir échanger d'ordinateur ou faire des sauvegardes par exemple)
+- Un réimport d'un nouveau fichier à jour ne doit pas complètement effacer un précédent import, mais seulement ajouter les opérations inconnues.
+- l'interface web doit faire ressentir une application pro, avec des graphismes, une police et une expérience utilisateur fluide.
+- Fortuneo permet la récupération des opérations sur 2 ans maximum. Le site doit pouvoir reconstituer le portefeuille initial "virtuel" au début de ces deux ans ainis que la poche espèce initiale (début des deux ans)
+
+Des essais sont disponibles dans 
+C:\GIT\old\FortuneoPEAViewer
+C:\GIT\old\FortuneoWebApp
+C:\GIT\old\FortuneoWebPerformanceAnalysis
+C:\GIT\old\FrenchPortfolioManager
+
+Tu as le choix des languages utilisés, choisi le plus adapté pour ce but
+Pour la partie sauvegarde sur le navigateur, tu peux t'inspirer de la solution technique du projet C:\GIT\old\kyf-test
+
+Afin de pouvoir consulter les données yahoo finance, sans etre bloqué par les politiques anti-spam, nous devrons mettre en place un genre de proxy comme pour KYF-test sur google sheet ou ailleurs. Les valorisations déjà obtenues devraient y être stockées pour un accès plus rapide, afin de ne demander que ce qui sera plus récent.
+
+Une partie de l'interface devra permettre d'associer le nom d'un actif avec son ISIN (clé), son ticker google, son ticker yahoo finance et eventuellement son ticker ou URL sur boursorama pour faire un scraper (a réaliser dans un deuxieme temps, nous allons utiliser yahoo finance uniquement dans un premier temps, et laisser les valeurs inconnues a la valeur d'import avec possibilité de mise a jour manuelle)
+
+
+

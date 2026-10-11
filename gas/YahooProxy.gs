@@ -51,6 +51,12 @@ function handle(e) {
     if (action === 'history') {
       return json_({ bars: getHistory_(p) });
     }
+    // Parallel Yahoo history for many tickers (UrlFetchApp.fetchAll).
+    if (action === 'historybulk') {
+      return json_({
+        histories: getHistoryBulk_(p.tickers || '', p.period1 || '', p.period2 || ''),
+      });
+    }
     if (action === 'search') {
       return json_({ quotes: searchYahoo_(p.q || '') });
     }
@@ -58,7 +64,11 @@ function handle(e) {
       return json_(quoteMeta_(requireTicker_(p.ticker)));
     }
     if (action === 'openfigi') {
-      return json_(openFigiIsin_(p.q || ''));
+      return json_(openFigiIsin_(p.q || '', p.venues || ''));
+    }
+    // Batch ISIN → ticker (Euronext Paris/Amsterdam only). Public ISINs, comma-separated.
+    if (action === 'openfigibatch') {
+      return json_({ results: openFigiIsinBatch_(p.isins || p.q || '') });
     }
     if (action === 'openfigisearch') {
       return json_({ results: openFigiSearch_(p.q || '') });
@@ -112,8 +122,7 @@ function getBulkPrices_(csv) {
   return out;
 }
 
-function getHistory_(p) {
-  var ticker = requireTicker_(p.ticker);
+function resolveHistoryWindow_(p) {
   var period1;
   var period2;
   var nowSec = Math.floor(Date.now() / 1000);
@@ -130,37 +139,295 @@ function getHistory_(p) {
   if (period2 - period1 > MAX_DAYS * 86400) {
     period1 = period2 - MAX_DAYS * 86400;
   }
+  return { period1: period1, period2: period2 };
+}
 
-  var cache = CacheService.getScriptCache();
-  var key = 'hist:' + ticker + ':' + period1 + ':' + period2;
-  // CacheService value max ~100KB; store compact JSON
-  var hit = cache.get(key);
-  if (hit) return JSON.parse(hit);
-
-  var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+function chartUrl_(ticker, period1, period2) {
+  return (
+    'https://query1.finance.yahoo.com/v8/finance/chart/' +
     encodeURIComponent(ticker) +
-    '?interval=1d&period1=' + period1 + '&period2=' + period2;
-  var payload = fetchYahoo_(url);
+    '?interval=1d&period1=' +
+    period1 +
+    '&period2=' +
+    period2
+  );
+}
+
+function barsFromYahooPayload_(payload) {
   var result = payload.chart.result[0];
   var ts = result.timestamp || [];
-  var closes = (result.indicators.quote[0].close) || [];
+  var quote = (result.indicators && result.indicators.quote && result.indicators.quote[0]) || {};
+  var closes = quote.close || [];
+  var adj =
+    (result.indicators &&
+      result.indicators.adjclose &&
+      result.indicators.adjclose[0] &&
+      result.indicators.adjclose[0].adjclose) ||
+    [];
   var bars = [];
   for (var i = 0; i < ts.length; i++) {
-    if (closes[i] === null || closes[i] === undefined) continue;
-    bars.push({ date: unixToIso_(ts[i]), close: Number(closes[i]) });
+    var c = closes[i];
+    if (c === null || c === undefined) c = adj[i];
+    if (c === null || c === undefined) continue;
+    bars.push({ date: unixToIso_(ts[i]), close: Number(c) });
+  }
+  return bars;
+}
+
+/** Reject Yahoo payloads that cannot cover the requested window (cache poison). */
+function barsCoverWindow_(bars, period1Sec, period2Sec) {
+  if (!bars || !bars.length) return false;
+  var spanDays = (period2Sec - period1Sec) / 86400;
+  if (spanDays <= 21) return bars.length >= 1;
+  // ~2Y window → expect dozens of sessions; a handful = wrong/short cache hit
+  if (spanDays > 180) return bars.length >= 40;
+  return bars.length >= 10;
+}
+
+/** Boursorama EOD: `d` = days since 1970-01-01 UTC. */
+function boursoramaGetTicksEod_(symbol, length) {
+  symbol = String(symbol || '').replace(/^\/+|\/+$/g, '');
+  if (!symbol) return [];
+  length = Math.min(7300, Math.max(30, parseInt(length || '730', 10) || 730));
+  var cache = CacheService.getScriptCache();
+  var ckey = 'breod:' + symbol + ':' + length;
+  var cached = cache.get(ckey);
+  if (cached) return JSON.parse(cached);
+
+  var url =
+    'https://www.boursorama.com/bourse/action/graph/ws/GetTicksEOD?symbol=' +
+    encodeURIComponent(symbol) +
+    '&length=' +
+    length +
+    '&period=0';
+  var resp = UrlFetchApp.fetch(url, {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'X-Requested-With': 'XMLHttpRequest',
+      Accept: 'application/json, text/javascript, */*; q=0.01',
+      Referer: 'https://www.boursorama.com/cours/' + symbol + '/',
+      'Accept-Language': 'fr-FR,fr;q=0.9',
+    },
+  });
+  if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return [];
+  var text = resp.getContentText() || '';
+  if (!text || text === '[]') return [];
+  var json;
+  try {
+    json = JSON.parse(text);
+  } catch (eParse) {
+    return [];
+  }
+  var tab = json && json.d && json.d.QuoteTab;
+  if (!tab || !tab.length) return [];
+  var bars = [];
+  for (var i = 0; i < tab.length; i++) {
+    var row = tab[i];
+    if (row == null || row.c === null || row.c === undefined) continue;
+    var day = Number(row.d);
+    if (!isFinite(day)) continue;
+    bars.push({ date: unixToIso_(Math.floor(day * 86400)), close: Number(row.c) });
+  }
+  try {
+    if (bars.length) cache.put(ckey, JSON.stringify(bars), HISTORY_TTL_SEC);
+  } catch (eCache) {}
+  return bars;
+}
+
+/** Yahoo ticker → Boursorama history (illiquid .PA etc. when Yahoo chart is empty). */
+function boursoramaHistoryBars_(yahooTicker) {
+  yahooTicker = String(yahooTicker || '').trim();
+  if (!yahooTicker) return [];
+  var bare = yahooTicker.replace(/\.[A-Za-z]{1,4}$/, '');
+  var paths = boursoramaPathsFor_(bare, yahooTicker);
+  for (var i = 0; i < paths.length; i++) {
+    var bars = boursoramaGetTicksEod_(paths[i], 730);
+    if (bars.length >= 5) return bars;
+  }
+  return [];
+}
+
+function filterBarsWindow_(bars, period1Sec, period2Sec) {
+  if (!bars || !bars.length) return [];
+  var from = unixToIso_(period1Sec);
+  var to = unixToIso_(period2Sec);
+  var out = [];
+  for (var i = 0; i < bars.length; i++) {
+    if (bars[i].date >= from && bars[i].date <= to) out.push(bars[i]);
+  }
+  return out.length ? out : bars;
+}
+
+function fetchHistoryBars_(ticker, period1, period2) {
+  var bars = [];
+  try {
+    var payload = fetchYahoo_(chartUrl_(ticker, period1, period2));
+    bars = barsFromYahooPayload_(payload);
+  } catch (eY) {
+    bars = [];
+  }
+  if (!barsCoverWindow_(bars, period1, period2)) {
+    bars = [];
+  }
+  // Fallback if Yahoo empty / too short for the window
+  if (!bars.length) {
+    var br = boursoramaHistoryBars_(ticker);
+    bars = filterBarsWindow_(br, period1, period2);
+  }
+  return bars;
+}
+
+function getHistory_(p) {
+  var ticker = requireTicker_(p.ticker);
+  var win = resolveHistoryWindow_(p);
+  var period1 = win.period1;
+  var period2 = win.period2;
+
+  var cache = CacheService.getScriptCache();
+  // v2 key — ignore hist: entries poisoned by the truncated ychart cache bug
+  var key = 'hist2:' + ticker + ':' + period1 + ':' + period2;
+  var hit = cache.get(key);
+  if (hit) {
+    var cachedBars = JSON.parse(hit);
+    if (barsCoverWindow_(cachedBars, period1, period2)) return cachedBars;
   }
 
+  var bars = fetchHistoryBars_(ticker, period1, period2);
+
   try {
-    cache.put(key, JSON.stringify(bars), HISTORY_TTL_SEC);
+    if (barsCoverWindow_(bars, period1, period2)) {
+      cache.put(key, JSON.stringify(bars), HISTORY_TTL_SEC);
+    }
   } catch (e) {
     // ignore cache size errors
   }
   return bars;
 }
 
+/**
+ * Fetch daily history for many tickers in parallel (Yahoo via UrlFetchApp.fetchAll).
+ * Same period1/period2 for the whole batch (ISO dates).
+ * @returns {Object.<string, Array<{date:string, close:number}>>}
+ */
+function getHistoryBulk_(csv, period1Iso, period2Iso) {
+  var parts = String(csv)
+    .split(',')
+    .map(function (s) {
+      return s.trim();
+    })
+    .filter(Boolean);
+  if (!parts.length) return {};
+  if (parts.length > MAX_TICKERS_BULK) throw new Error('Trop de tickers');
+
+  var win = resolveHistoryWindow_({
+    period1: period1Iso,
+    period2: period2Iso,
+  });
+  var period1 = win.period1;
+  var period2 = win.period2;
+  var cache = CacheService.getScriptCache();
+  var out = {};
+  var need = [];
+
+  for (var i = 0; i < parts.length; i++) {
+    var t = requireTicker_(parts[i]);
+    var key = 'hist2:' + t + ':' + period1 + ':' + period2;
+    var cached = cache.get(key);
+    if (cached) {
+      var cachedBars = JSON.parse(cached);
+      if (barsCoverWindow_(cachedBars, period1, period2)) {
+        out[t] = cachedBars;
+      } else {
+        need.push(t);
+      }
+    } else {
+      need.push(t);
+    }
+  }
+
+  if (!need.length) return out;
+
+  var reqs = need.map(function (t) {
+    return {
+      url: chartUrl_(t, period1, period2),
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'application/json,text/plain,*/*',
+      },
+    };
+  });
+  var responses = UrlFetchApp.fetchAll(reqs);
+
+  for (var j = 0; j < need.length; j++) {
+    var ticker = need[j];
+    try {
+      var resp = responses[j];
+      var code = resp.getResponseCode();
+      var bars = [];
+      if (code >= 200 && code < 300) {
+        var payload = JSON.parse(resp.getContentText());
+        if (
+          payload &&
+          payload.chart &&
+          payload.chart.result &&
+          payload.chart.result[0]
+        ) {
+          bars = barsFromYahooPayload_(payload);
+        }
+      }
+      // Illiquid / Yahoo-empty → Boursorama EOD (e.g. CAT31.PA)
+      if (!barsCoverWindow_(bars, period1, period2)) {
+        bars = filterBarsWindow_(
+          boursoramaHistoryBars_(ticker),
+          period1,
+          period2,
+        );
+      }
+      if (!barsCoverWindow_(bars, period1, period2)) continue;
+      out[ticker] = bars;
+      try {
+        if (barsCoverWindow_(bars, period1, period2)) {
+          cache.put(
+            'hist2:' + ticker + ':' + period1 + ':' + period2,
+            JSON.stringify(bars),
+            HISTORY_TTL_SEC,
+          );
+        }
+      } catch (eCache) {}
+    } catch (eOne) {
+      // skip failed ticker
+    }
+  }
+  return out;
+}
+
+/**
+ * Full-URL cache key. NEVER truncate base64(url): the old
+ * `base64EncodeWebSafe(url).slice(0, 80)` stopped before `period1`/`period2`,
+ * so a 5-day delta response was reused for a 2Y request (CAT31.PA etc.).
+ */
+function yahooChartCacheKey_(url) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.MD5,
+    String(url),
+  );
+  var hex = '';
+  for (var i = 0; i < digest.length; i++) {
+    var b = (digest[i] + 256) % 256;
+    hex += ('0' + b.toString(16)).slice(-2);
+  }
+  return 'ych5:' + hex;
+}
+
 function fetchYahoo_(url) {
   var cache = CacheService.getScriptCache();
-  var ykey = 'ychart:' + Utilities.base64EncodeWebSafe(url).slice(0, 80);
+  var ykey = yahooChartCacheKey_(url);
   var cached = cache.get(ykey);
   if (cached) return JSON.parse(cached);
 
@@ -168,7 +435,9 @@ function fetchYahoo_(url) {
     muteHttpExceptions: true,
     followRedirects: true,
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; VisualiseurFortuneo/1.0)',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'application/json,text/plain,*/*',
     },
   });
   var code = resp.getResponseCode();
@@ -589,13 +858,15 @@ function boursoramaPathsFor_(bareTicker, hint) {
   } else if (/\.AS\b|\bNA\b|\bXAMS\b/.test(h)) {
     push(bareTicker);
     push('1rP' + bareTicker);
-  } else if (/\.DE\b|\bGY\b|\bGF\b|\bXETR\b/.test(h)) {
-    push(bareTicker);
+  } else if (/\.DE\b|\.F\b|\bGY\b|\bGF\b|\bXETR\b|\bXFRA\b/.test(h)) {
     push('1z' + bareTicker);
+    push(bareTicker);
+    push('1rP' + bareTicker);
   } else {
-    // Unknown: try common EU patterns
+    // No venue hint: try common Boursorama path prefixes then bare
     push('1rP' + bareTicker);
     push('FF55-' + bareTicker);
+    push('1z' + bareTicker);
     push(bareTicker);
   }
   return paths;
@@ -649,8 +920,9 @@ function boursoramaIsinFromPath_(path) {
   } else if (/^FF55-/i.test(path) || /Sibe/i.test(html)) {
     exchange = 'XMAD'; exchangeCountry = 'ESP';
     yahooTicker = path.replace(/^FF55-/i, '') + '.MC';
-  } else if (/XETRA/i.test(html)) {
+  } else if (/^1z/i.test(path) || /XETRA|Frankfurt|Francfort/i.test(html)) {
     exchange = 'XETR'; exchangeCountry = 'DEU';
+    yahooTicker = path.replace(/^1z/i, '') + '.DE';
   }
 
   var out = {
@@ -707,14 +979,47 @@ function boursoramaSearchSymbols_(q) {
   return out;
 }
 
-/** OpenFIGI: public ISIN → ticker; map PAR to Yahoo .PA */
-function openFigiIsin_(isin) {
+/** Euronext Paris (PAR/FP) or Amsterdam (NA) — preferred PEA venues. */
+function isFigiPaAm_(exch) {
+  var e = String(exch || '').toUpperCase();
+  return (
+    e === 'FP' || e === 'PAR' || e === 'PN' || e === 'PA' ||
+    e === 'NA' || e === 'AS'
+  );
+}
+
+function pickFigiRow_(data, venues) {
+  var onlyPaAm = String(venues || '').toLowerCase() === 'pa-am';
+  var bestPa = null;
+  var bestAm = null;
+  var bestAny = null;
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    if (!row || !row.ticker) continue;
+    var e = String(row.exchCode || '').toUpperCase();
+    if (e === 'FP' || e === 'PAR' || e === 'PN' || e === 'PA') {
+      if (!bestPa) bestPa = row;
+    } else if (e === 'NA' || e === 'AS') {
+      if (!bestAm) bestAm = row;
+    } else if (!onlyPaAm && !bestAny) {
+      bestAny = row;
+    }
+  }
+  return bestPa || bestAm || (onlyPaAm ? null : bestAny);
+}
+
+/**
+ * OpenFIGI: public ISIN → ticker.
+ * venues=pa-am → only Euronext Paris / Amsterdam (no US/OTC fallback).
+ */
+function openFigiIsin_(isin, venues) {
   isin = String(isin || '').trim().toUpperCase();
   if (!/^[A-Z]{2}[A-Z0-9]{10}$/.test(isin)) {
     return { error: 'ISIN invalide' };
   }
+  var onlyPaAm = String(venues || '').toLowerCase() === 'pa-am';
   var cache = CacheService.getScriptCache();
-  var key = 'figi:' + isin;
+  var key = (onlyPaAm ? 'figiPaAm:' : 'figi:') + isin;
   var hit = cache.get(key);
   if (hit) return JSON.parse(hit);
 
@@ -732,22 +1037,108 @@ function openFigiIsin_(isin) {
   var data = (json[0] && json[0].data) || [];
   if (!data.length) return {};
 
-  // Prefer Paris equity
-  var best = null;
-  for (var i = 0; i < data.length; i++) {
-    var row = data[i];
-    if (!row.ticker) continue;
-    if (row.exchCode === 'FP' || row.exchCode === 'PAR' || row.exchCode === 'PN') {
-      best = row;
-      break;
-    }
-    if (!best) best = row;
-  }
+  var best = pickFigiRow_(data, venues);
   if (!best || !best.ticker) return {};
 
   var yahoo = figiToYahoo_(best.ticker, best.exchCode);
   var out = { ticker: yahoo, exchCode: best.exchCode || '', figiTicker: best.ticker };
   try { cache.put(key, JSON.stringify(out), 604800); } catch (e) {}
+  return out;
+}
+
+/**
+ * Batch OpenFIGI mapping — Euronext Paris / Amsterdam only.
+ * Free API: max 10 jobs / request. Returns only PA/AM hits.
+ * @returns {Array<{isin:string, ticker?:string, exchCode?:string}>}
+ */
+function openFigiIsinBatch_(csv) {
+  var raw = String(csv || '').split(/[,;\s]+/);
+  var isins = [];
+  var seen = {};
+  for (var i = 0; i < raw.length; i++) {
+    var id = String(raw[i] || '').trim().toUpperCase();
+    if (!/^[A-Z]{2}[A-Z0-9]{10}$/.test(id)) continue;
+    if (seen[id]) continue;
+    seen[id] = true;
+    isins.push(id);
+    if (isins.length >= 100) break;
+  }
+  if (!isins.length) return [];
+
+  var cache = CacheService.getScriptCache();
+  var out = [];
+  var need = [];
+  for (var j = 0; j < isins.length; j++) {
+    var isin = isins[j];
+    var cached = cache.get('figiPaAm:' + isin);
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      out.push({
+        isin: isin,
+        ticker: parsed.ticker || '',
+        exchCode: parsed.exchCode || '',
+      });
+    } else {
+      need.push(isin);
+    }
+  }
+
+  // OpenFIGI free tier: 10 mappings per request
+  var CHUNK = 10;
+  for (var c = 0; c < need.length; c += CHUNK) {
+    var chunk = need.slice(c, c + CHUNK);
+    var jobs = [];
+    for (var k = 0; k < chunk.length; k++) {
+      jobs.push({ idType: 'ID_ISIN', idValue: chunk[k] });
+    }
+    var resp = UrlFetchApp.fetch('https://api.openfigi.com/v3/mapping', {
+      method: 'post',
+      contentType: 'application/json',
+      muteHttpExceptions: true,
+      payload: JSON.stringify(jobs),
+      headers: { 'User-Agent': 'VisualiseurFortuneo/1.0' },
+    });
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+      throw new Error('OpenFIGI HTTP ' + resp.getResponseCode());
+    }
+    var json = JSON.parse(resp.getContentText());
+    for (var r = 0; r < chunk.length; r++) {
+      var isin2 = chunk[r];
+      var block = json[r] || {};
+      var data2 = block.data || [];
+      var best2 = pickFigiRow_(data2, 'pa-am');
+      if (best2 && best2.ticker) {
+        var yahoo2 = figiToYahoo_(best2.ticker, best2.exchCode);
+        var rowOut = {
+          isin: isin2,
+          ticker: yahoo2,
+          exchCode: best2.exchCode || '',
+          figiTicker: best2.ticker,
+        };
+        out.push(rowOut);
+        try {
+          cache.put(
+            'figiPaAm:' + isin2,
+            JSON.stringify({
+              ticker: yahoo2,
+              exchCode: best2.exchCode || '',
+              figiTicker: best2.ticker,
+            }),
+            604800,
+          );
+        } catch (eCache) {}
+      } else {
+        // Cache negative briefly to avoid re-hitting free quota in the same run
+        out.push({ isin: isin2, ticker: '', exchCode: '' });
+        try {
+          cache.put('figiPaAm:' + isin2, JSON.stringify({}), 3600);
+        } catch (eNeg) {}
+      }
+    }
+    if (c + CHUNK < need.length) {
+      Utilities.sleep(250);
+    }
+  }
   return out;
 }
 

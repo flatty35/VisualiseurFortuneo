@@ -9,6 +9,7 @@ import {
 } from '@/domain/portfolioModel'
 import {
   domainSupportToFlat,
+  envelopeTypeToKind,
   projectPortfolio,
 } from '@/domain/flatAdapters'
 import type {
@@ -106,7 +107,12 @@ export async function loadProjected(): Promise<{
 }> {
   const portfolio = await loadPortfolio()
   const projected = projectPortfolio(portfolio)
-  return { portfolio, ...projected }
+  // Titres-only cash: ignore legacy espèces rows (no ISIN)
+  return {
+    portfolio,
+    ...projected,
+    operations: projected.operations.filter((o) => o.synthetic || !!o.isin),
+  }
 }
 
 export async function loadEnvelopeProjected(envelope: EnvelopeType): Promise<{
@@ -124,6 +130,26 @@ export async function loadEnvelopeProjected(envelope: EnvelopeType): Promise<{
     virtualOpening:
       virtualOpenings.find((v) => v.envelope === envelope) ?? null,
   }
+}
+
+/**
+ * Clear all operations (+ virtual opening) for one envelope.
+ * Keeps global supports / tickers (Correspondances).
+ */
+export async function clearEnvelopeOperations(
+  envelope: EnvelopeType,
+): Promise<{ removed: number }> {
+  let removed = 0
+  await updatePortfolio((p) => {
+    const env = p.envelopeByKind(envelopeTypeToKind(envelope))
+    if (!env) return
+    removed = env.operations.length
+    env.operations = []
+    delete env.customState.virtualOpeningCash
+    delete env.customState.virtualOpeningDate
+    env.updatedAt = new Date().toISOString()
+  })
+  return { removed }
 }
 
 /** Upsert a flat Support DTO into the Portfolio store (ticker / name edits). */

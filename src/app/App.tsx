@@ -1,8 +1,9 @@
-import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { NavLink, Route, Routes } from 'react-router-dom'
 import DashboardPage from '@/ui/pages/DashboardPage'
 import ImportPage from '@/ui/pages/ImportPage'
 import ChartsPage from '@/ui/pages/ChartsPage'
 import TriPage from '@/ui/pages/TriPage'
+import ContributionPage from '@/ui/pages/ContributionPage'
 import MappingsPage from '@/ui/pages/MappingsPage'
 import BackupPage from '@/ui/pages/BackupPage'
 import PrivacyPage from '@/ui/pages/PrivacyPage'
@@ -12,17 +13,15 @@ const links = [
   { to: '/import', label: 'Import' },
   { to: '/charts', label: 'Graphiques' },
   { to: '/tri', label: 'TRI' },
+  { to: '/contribution', label: 'Contribution' },
   { to: '/mappings', label: 'Correspondances' },
   { to: '/backup', label: 'Sauvegarde' },
   { to: '/privacy', label: 'Privacy' },
 ]
 
 export default function App() {
-  const { pathname } = useLocation()
-  const wide = pathname === '/charts'
-
   return (
-    <div className={`app-shell${wide ? ' app-shell--wide' : ''}`}>
+    <div className="app-shell">
       <header className="nav">
         <div className="brand">
           Visualiseur <span>Fortuneo</span>
@@ -45,6 +44,7 @@ export default function App() {
         <Route path="/import" element={<ImportPage />} />
         <Route path="/charts" element={<ChartsPage />} />
         <Route path="/tri" element={<TriPage />} />
+        <Route path="/contribution" element={<ContributionPage />} />
         <Route path="/mappings" element={<MappingsPage />} />
         <Route path="/backup" element={<BackupPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />

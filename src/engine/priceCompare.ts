@@ -1,6 +1,7 @@
-import type { Operation, QuoteBar, Support } from '@/domain/types'
+import type { Operation, OperationType, QuoteBar, Support } from '@/domain/types'
 import type { HoldingsSnapshot } from './positions'
 import type { ChartSeries } from '@/ui/components/PortfolioChart'
+import { priceOnDate } from './valuation'
 
 const PALETTE = [
   '#7dcea0',
@@ -12,37 +13,6 @@ const PALETTE = [
   '#ffb74d',
   '#90a4ae',
 ]
-
-function closeOnOrBefore(
-  date: string,
-  bars: QuoteBar[] | undefined,
-): number | undefined {
-  if (!bars?.length) return undefined
-  const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date))
-  let best: number | undefined
-  for (const b of sorted) {
-    if (b.date <= date) best = b.close
-    else break
-  }
-  return best
-}
-
-function priceOnDate(
-  date: string,
-  support: Support | undefined,
-  quotes: Map<string, QuoteBar[]>,
-): number | undefined {
-  if (!support) return undefined
-  if (support.yahooTicker) {
-    const px = closeOnOrBefore(date, quotes.get(support.yahooTicker))
-    if (px !== undefined) return px
-  }
-  const manual = support.manualPrices
-    ?.filter((p) => p.date <= date)
-    .sort((a, b) => b.date.localeCompare(a.date))[0]
-  if (manual) return manual.price
-  return support.staticPrice
-}
 
 /** First real purchase date, else POSITION_SEED. */
 export function firstBuyDate(operations: Operation[], isin: string): string | undefined {
@@ -109,7 +79,7 @@ export function splitHeldSegments(points: Pt[]): { held: boolean; points: Pt[] }
 }
 
 /**
- * Price comparison in base 100 at first buy.
+ * Price comparison in % vs first buy (0 % at first purchase).
  * Solid while net qty > 0, dashed while flat — segments join at boundaries.
  */
 export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[] {
@@ -141,7 +111,7 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
       )?.price
     if (!basePx || basePx === 0) return
 
-    // Points from first buy (base 100); shared axisDates pads earlier period days with null.
+    // Points from first buy (0 %); shared axisDates pads earlier period days with null.
     const start = buyDate > from ? buyDate : from
     const points: Pt[] = []
     for (const day of days) {
@@ -152,7 +122,7 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
       const held = Math.abs(qty) > 1e-8
       points.push({
         date: day,
-        value: (px / basePx) * 100,
+        value: (px / basePx - 1) * 100,
         held,
         price: px,
         valuation: held ? qty * px : 0,
@@ -173,6 +143,7 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
         valuations: seg.points.map((p) => p.valuation ?? 0),
         dashed: !seg.held,
         color,
+        valueUnit: 'pct',
         showInLegend: segIdx === 0,
         connectGroup: isin,
       })
@@ -180,4 +151,136 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
   })
 
   return out
+}
+
+function isPruQtyOp(type: OperationType): boolean {
+  return (
+    type === 'ACHAT' ||
+    type === 'VENTE' ||
+    type === 'SCRIPT' ||
+    type === 'RACHAT' ||
+    type === 'ACTIONS_GRATUITES' ||
+    type === 'AUGMENTATION_CAPITAL'
+  )
+}
+
+function signedPruQty(type: OperationType, qty: number): number {
+  const q = Math.abs(qty)
+  if (
+    type === 'ACHAT' ||
+    type === 'SCRIPT' ||
+    type === 'ACTIONS_GRATUITES' ||
+    type === 'AUGMENTATION_CAPITAL'
+  ) {
+    return q
+  }
+  if (type === 'VENTE' || type === 'RACHAT') return -q
+  return 0
+}
+
+/**
+ * Running average cost (PRU) after each buy/sell, as a step series.
+ * Values are % vs first-buy price (same scale as the cours curve); `realPrices`
+ * holds the PRU in € for the tooltip. Only meaningful for a single ISIN.
+ */
+export function buildPruStepSeries(input: {
+  isin: string
+  operations: Operation[]
+  supports: Support[]
+  quotes: Map<string, QuoteBar[]>
+  days: string[]
+  from: string
+  to: string
+}): ChartSeries | null {
+  const { isin, days, from, to } = input
+  if (!days.length) return null
+
+  const buyDate = firstBuyDate(input.operations, isin)
+  if (!buyDate) return null
+  const support = input.supports.find((s) => s.isin === isin)
+  const basePx =
+    priceOnDate(buyDate, support, input.quotes) ??
+    input.operations.find(
+      (o) =>
+        o.isin === isin &&
+        o.price &&
+        (o.type === 'ACHAT' || o.type === 'SCRIPT'),
+    )?.price
+  if (!basePx || basePx === 0) return null
+
+  const ops = input.operations
+    .filter(
+      (o) =>
+        o.isin === isin &&
+        !o.synthetic &&
+        o.quantity !== undefined &&
+        isPruQtyOp(o.type),
+    )
+    .sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
+
+  // PRU after each trade day (last op of the day wins).
+  const pruByDay = new Map<string, number | null>()
+  let qty = 0
+  let cost = 0
+  for (const op of ops) {
+    const delta = signedPruQty(op.type, op.quantity ?? 0)
+    const px = op.price ?? 0
+    const fees = Math.abs(op.fees ?? 0)
+    const freeShare = op.type === 'ACTIONS_GRATUITES'
+    if (delta > 0) {
+      cost += freeShare ? 0 : delta * px + fees
+      qty += delta
+    } else if (delta < 0) {
+      const sellQty = Math.min(qty, -delta)
+      if (qty > 1e-12) cost *= 1 - sellQty / qty
+      qty = Math.max(0, qty + delta)
+      if (qty < 1e-12) {
+        qty = 0
+        cost = 0
+      }
+    }
+    pruByDay.set(op.date, qty > 1e-12 ? cost / qty : null)
+  }
+
+  const dates: string[] = []
+  const values: Array<number | null> = []
+  const realPrices: number[] = []
+  let current: number | null = null
+
+  // Seed PRU from trades before the visible window.
+  for (const [day, pru] of [...pruByDay.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0]),
+  )) {
+    if (day >= from) break
+    current = pru
+  }
+
+  for (const day of days) {
+    if (day < from || day > to) continue
+    if (day < buyDate) continue
+    if (pruByDay.has(day)) current = pruByDay.get(day) ?? null
+    dates.push(day)
+    if (current != null && current > 0) {
+      values.push((current / basePx - 1) * 100)
+      realPrices.push(Math.round(current * 10000) / 10000)
+    } else {
+      values.push(null)
+      realPrices.push(0)
+    }
+  }
+
+  if (!dates.some((_, i) => values[i] != null)) return null
+
+  return {
+    id: `${isin}-pru`,
+    name: 'PRU',
+    dates,
+    values,
+    realPrices,
+    color: '#c4a35a',
+    dashed: false,
+    step: 'end',
+    valueUnit: 'pct',
+    showInLegend: true,
+  }
 }

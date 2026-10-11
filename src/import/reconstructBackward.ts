@@ -1,6 +1,5 @@
 import { reverseQuantityDelta } from '@/domain/classify'
 import { makeOperationId, operationFingerprint } from '@/domain/fingerprint'
-import { cashImpact } from '@/engine/cashImpact'
 import type {
   EnvelopeType,
   Operation,
@@ -8,13 +7,18 @@ import type {
   VirtualOpening,
   VirtualOpeningPosition,
 } from '@/domain/types'
+import {
+  buildNameToIsin,
+  isLocalSupportId,
+  normalizeName,
+} from './resolveIsin'
 
 /**
  * Reconstruct virtual opening at the start of the known history window
- * by walking backward from current open positions + current cash.
+ * by walking backward from current open positions.
  *
- * Cash ops must be the espèces ledger only (no ISIN). Titres rows
- * contribute quantity reversals but cashImpact() ignores them.
+ * Titres-only cash model: opening cash = 0 (no cumulative pocket). Optional
+ * currentCash is kept as reportedCash (idle cash today).
  */
 export function reconstructVirtualOpening(input: {
   envelope: EnvelopeType
@@ -38,23 +42,32 @@ export function reconstructVirtualOpening(input: {
     qty.set(p.isin, { name: p.name, quantity: p.quantity })
   }
 
+  // Map LOCAL / label-only ops onto open-position ISINs so reverse walk
+  // undoes the same keys as the XLS snapshot (avoids ~2× qty at open).
+  const nameToIsin = buildNameToIsin(positions, operations)
+  for (const p of positions) {
+    if (p.isin && !isLocalSupportId(p.isin)) {
+      nameToIsin.set(normalizeName(p.name), p.isin)
+    }
+  }
+
   const sortedDesc = [...operations]
     .filter((o) => !o.synthetic)
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
 
-  // Default current cash = 0 when unknown (never invent a negative "estimate"
-  // from truncated history starting at 0 — that was producing ~-valo titres).
-  let cash = input.currentCash ?? 0
-
+  // Titres-only: do not reverse-walk a cash pile. Opening cash = 0;
+  // idle cash today is reportedCash.
   for (const op of sortedDesc) {
-    cash -= cashImpact(op)
-    if (!op.isin || op.quantity === undefined) continue
-    const delta = reverseQuantityDelta(op.type, op.quantity)
+    const q = op.quantity
+    if (q === undefined || !Number.isFinite(q) || Math.abs(q) < 1e-12) continue
+    const isin = resolveOpIsin(op, nameToIsin)
+    if (!isin) continue
+    const delta = reverseQuantityDelta(op.type, q)
     if (delta === 0) continue
-    const cur = qty.get(op.isin) ?? { name: op.name ?? op.isin, quantity: 0 }
+    const cur = qty.get(isin) ?? { name: op.name ?? isin, quantity: 0 }
     cur.quantity += delta
     cur.name = op.name ?? cur.name
-    qty.set(op.isin, cur)
+    qty.set(isin, cur)
   }
 
   const openingPositions: VirtualOpeningPosition[] = [...qty.entries()]
@@ -68,14 +81,35 @@ export function reconstructVirtualOpening(input: {
 
   const dates = operations.map((o) => o.date).sort()
   const openingDate = dates[0] ?? new Date().toISOString().slice(0, 10)
+  const reported =
+    input.currentCash !== undefined && Number.isFinite(input.currentCash)
+      ? Math.round(input.currentCash * 100) / 100
+      : undefined
 
   return {
     envelope,
     date: openingDate,
-    cash: Math.round(cash * 100) / 100,
+    cash: 0,
+    reportedCash: reported,
     positions: openingPositions,
     computedAt: new Date().toISOString(),
   }
+}
+
+function resolveOpIsin(
+  op: Operation,
+  nameToIsin: Map<string, string>,
+): string | undefined {
+  if (op.isin && !isLocalSupportId(op.isin)) return op.isin
+  if (op.name) {
+    const key = normalizeName(op.name)
+    const direct = nameToIsin.get(key)
+    if (direct) return direct
+    for (const [n, i] of nameToIsin) {
+      if (!isLocalSupportId(i) && (key.includes(n) || n.includes(key))) return i
+    }
+  }
+  return op.isin
 }
 
 /** Build POSITION_SEED synthetic operations from a VirtualOpening. */
@@ -127,12 +161,3 @@ export function seedsFromVirtualOpening(vo: VirtualOpening): Operation[] {
   return seeds
 }
 
-/** Forward cash cumsum (for diagnostics). Does not invent an opening balance. */
-export function forwardCashDelta(operations: Operation[]): number {
-  let cash = 0
-  const sorted = [...operations]
-    .filter((o) => !o.synthetic)
-    .sort((a, b) => a.date.localeCompare(b.date))
-  for (const op of sorted) cash += cashImpact(op)
-  return Math.round(cash * 100) / 100
-}

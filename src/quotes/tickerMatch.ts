@@ -3,16 +3,22 @@ import { listFlatSupports, putFlatSupport } from '@/persist/portfolioStore'
 import {
   isProxyConfigured,
   mapIsinOpenFigi,
+  mapIsinsOpenFigiBatch,
   searchYahoo,
   type YahooSearchHit,
 } from './gasClient'
+import {
+  guessYahooTicker,
+  pickBestFortuneoHit,
+  searchFortuneoFirstHit,
+} from './fortuneoSearch'
 import { lookupSeedTicker, normalizeMatchKey } from './tickerSeed'
 
 export interface MatchResult {
   isin: string
   name: string
   ticker?: string
-  source: 'existing' | 'seed' | 'yahoo' | 'openfigi' | 'none'
+  source: 'existing' | 'seed' | 'fortuneo' | 'yahoo' | 'openfigi' | 'none'
   detail?: string
 }
 
@@ -97,7 +103,7 @@ export function scoreYahooHit(hit: YahooSearchHit, name: string): number {
 
   let score = 0
   if (symbol.endsWith('.PA')) score += 50
-  else if (/\.(AS|BR|MI|MC|DE|LS|SW)$/.test(symbol)) score += 15
+  else if (/\.(AS|BR|MI|MC|DE|F|WA|LS|SW)$/.test(symbol)) score += 15
 
   if (qt === 'EQUITY') score += 10
   if (qt === 'ETF' || qt === 'MUTUALFUND') score += 8
@@ -148,9 +154,17 @@ export function preferPaTicker(quotes: YahooSearchHit[]): string | undefined {
   return pickBestTicker(quotes, '')
 }
 
+function isRealIsin(isin?: string): isin is string {
+  return Boolean(isin && /^[A-Z]{2}[A-Z0-9]{10}$/i.test(isin))
+}
+
 export async function resolveTickerForSupport(
   support: Support,
-  options?: { force?: boolean },
+  options?: {
+    force?: boolean
+    /** Skip OpenFIGI PA/AM (already tried in a batch pass). */
+    skipOpenFigiEuronext?: boolean
+  },
 ): Promise<MatchResult> {
   if (support.yahooTicker && !options?.force) {
     return {
@@ -166,6 +180,48 @@ export async function resolveTickerForSupport(
     return { isin: support.isin, name: support.name, ticker: seeded, source: 'seed' }
   }
 
+  // 0) OpenFIGI Euronext Paris/Amsterdam when ISIN is known
+  if (
+    !options?.skipOpenFigiEuronext &&
+    isProxyConfigured() &&
+    isRealIsin(support.isin)
+  ) {
+    try {
+      const figi = await mapIsinOpenFigi(support.isin, { euronextOnly: true })
+      if (figi?.ticker) {
+        return {
+          isin: support.isin,
+          name: support.name,
+          ticker: figi.ticker,
+          source: 'openfigi',
+          detail: `pa-am ${figi.exchCode || ''}`.trim(),
+        }
+      }
+    } catch {
+      // cascade
+    }
+  }
+
+  // 1) Fortuneo Accès Marchés
+  {
+    const queries = buildSearchQueries(support.name, support.isin)
+    const { hits, query } = await searchFortuneoFirstHit({
+      name: support.name,
+      queries,
+    })
+    const best = pickBestFortuneoHit(hits, support.name)
+    const yahoo = best ? guessYahooTicker(best) : undefined
+    if (yahoo) {
+      return {
+        isin: support.isin,
+        name: support.name,
+        ticker: yahoo,
+        source: 'fortuneo',
+        detail: `q=${query || support.name} isin=${best?.codeIsin || ''}`,
+      }
+    }
+  }
+
   if (!isProxyConfigured()) {
     return {
       isin: support.isin,
@@ -175,7 +231,7 @@ export async function resolveTickerForSupport(
     }
   }
 
-  // 1) Yahoo: ISIN first, then name / keywords
+  // 2) Yahoo: ISIN first, then name / keywords
   const queries = buildSearchQueries(support.name, support.isin)
   for (const q of queries) {
     try {
@@ -195,8 +251,8 @@ export async function resolveTickerForSupport(
     }
   }
 
-  // 2) OpenFIGI ISIN → exchange ticker (PAR → .PA) if Yahoo search missed
-  if (support.isin) {
+  // 3) OpenFIGI any venue (last resort)
+  if (isRealIsin(support.isin)) {
     try {
       const figi = await mapIsinOpenFigi(support.isin)
       if (figi?.ticker) {
@@ -225,7 +281,7 @@ export interface TickerCandidate {
   /** Best score across queries (higher = better name / .PA fit) */
   score: number
   /** How this candidate was found */
-  sources: Array<'seed' | 'yahoo' | 'openfigi'>
+  sources: Array<'seed' | 'fortuneo' | 'yahoo' | 'openfigi'>
   /** Queries that returned this symbol */
   queries: string[]
 }
@@ -261,7 +317,7 @@ export async function searchTickerCandidates(input: {
       quoteType?: string
       exch?: string
     },
-    source: 'seed' | 'yahoo' | 'openfigi',
+    source: 'seed' | 'fortuneo' | 'yahoo' | 'openfigi',
     query: string,
     scoreBoost = 0,
   ) => {
@@ -302,6 +358,58 @@ export async function searchTickerCandidates(input: {
   }
 
   const queries = buildSearchQueries(name, isin)
+
+  // OpenFIGI Euronext first when ISIN known — stop cascade on PAR/AMS hit
+  if (isin && isProxyConfigured()) {
+    input.onStatus?.(`OpenFIGI PA/AM ${isin}…`)
+    try {
+      const figi = await mapIsinOpenFigi(isin, { euronextOnly: true })
+      if (figi?.ticker) {
+        upsert(
+          {
+            symbol: figi.ticker,
+            shortname: name,
+            quoteType: 'EQUITY',
+            exch: figi.exchCode,
+          },
+          'openfigi',
+          `openfigi-pa-am:${isin}`,
+          70,
+        )
+        const candidates = [...bySymbol.values()].sort((a, b) => b.score - a.score)
+        return { queries, candidates }
+      }
+    } catch {
+      // cascade
+    }
+  }
+
+  // Fortuneo — if hit, keep as primary guess and skip Yahoo/OpenFIGI
+  {
+    input.onStatus?.('Fortuneo…')
+    const { hits, query } = await searchFortuneoFirstHit({
+      name,
+      queries,
+      onStatus: input.onStatus,
+    })
+    const best = pickBestFortuneoHit(hits, name)
+    const yahoo = best ? guessYahooTicker(best) : undefined
+    if (yahoo) {
+      upsert(
+        {
+          symbol: yahoo,
+          shortname: best?.libelle || name,
+          quoteType: best?.type || 'EQUITY',
+          exch: best?.place,
+        },
+        'fortuneo',
+        query || name,
+        60,
+      )
+      const candidates = [...bySymbol.values()].sort((a, b) => b.score - a.score)
+      return { queries, candidates }
+    }
+  }
 
   if (!isProxyConfigured()) {
     const candidates = [...bySymbol.values()].sort((a, b) => b.score - a.score)
@@ -410,18 +518,12 @@ export async function autoMatchSupports(
   const results: MatchResult[] = []
   let updated = 0
   let failed = 0
-
   const total = list.length
-  for (let i = 0; i < list.length; i++) {
-    const s = list[i]
-    onProgress?.({
-      current: i + 1,
-      total,
-      name: s.name,
-      status: `Recherche ticker… (${i + 1}/${total})`,
-    })
 
-    const r = await resolveTickerForSupport(s, { force })
+  const applyTicker = async (
+    s: Support,
+    r: MatchResult,
+  ): Promise<void> => {
     results.push(r)
     if (r.ticker && (force || r.source !== 'existing')) {
       const g = googleTickerFromYahoo(r.ticker)
@@ -441,9 +543,93 @@ export async function autoMatchSupports(
       }
       failed++
     }
+  }
 
-    // Mild throttle to avoid Yahoo / GAS rate limits
-    if (i < list.length - 1) {
+  // --- Pass 0: local seed (instant) ---
+  const pending: Support[] = []
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i]
+    if (s.yahooTicker && !force) {
+      await applyTicker(s, {
+        isin: s.isin,
+        name: s.name,
+        ticker: s.yahooTicker,
+        source: 'existing',
+      })
+      continue
+    }
+    const seeded = lookupSeedTicker(s.name)
+    if (seeded) {
+      onProgress?.({
+        current: i + 1,
+        total,
+        name: s.name,
+        status: `Seed ${seeded}…`,
+      })
+      await applyTicker(s, {
+        isin: s.isin,
+        name: s.name,
+        ticker: seeded,
+        source: 'seed',
+      })
+      continue
+    }
+    pending.push(s)
+  }
+
+  // --- Pass 1: OpenFIGI batch Euronext Paris / Amsterdam ---
+  const withIsin = pending.filter((s) => isRealIsin(s.isin))
+  const figiHits = new Map<string, { ticker: string; exchCode?: string }>()
+  if (withIsin.length && isProxyConfigured()) {
+    onProgress?.({
+      current: results.length + 1,
+      total,
+      name: withIsin[0].name,
+      status: `OpenFIGI batch PAR/AMS (${withIsin.length})…`,
+    })
+    try {
+      const mapped = await mapIsinsOpenFigiBatch(withIsin.map((s) => s.isin))
+      for (const [isin, hit] of mapped) figiHits.set(isin, hit)
+    } catch {
+      // cascade will retry per-title
+    }
+  }
+
+  const stillPending: Support[] = []
+  for (const s of pending) {
+    const hit = isRealIsin(s.isin) ? figiHits.get(s.isin.toUpperCase()) : undefined
+    if (hit?.ticker) {
+      await applyTicker(s, {
+        isin: s.isin,
+        name: s.name,
+        ticker: hit.ticker,
+        source: 'openfigi',
+        detail: `batch pa-am ${hit.exchCode || ''}`.trim(),
+      })
+    } else {
+      stillPending.push(s)
+    }
+  }
+
+  // --- Pass 2: cascade (Fortuneo → Yahoo → OpenFIGI any) for misses ---
+  for (let i = 0; i < stillPending.length; i++) {
+    const s = stillPending[i]
+    const done = results.length + i + 1
+    onProgress?.({
+      current: Math.min(done, total),
+      total,
+      name: s.name,
+      status: `Cascade ticker… (${Math.min(done, total)}/${total})`,
+    })
+
+    const r = await resolveTickerForSupport(s, {
+      force,
+      // Batch already covered PA/AM; skip duplicate OpenFIGI euronext call
+      skipOpenFigiEuronext: isRealIsin(s.isin),
+    })
+    await applyTicker(s, r)
+
+    if (i < stillPending.length - 1) {
       await sleep(120)
     }
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { isOpenFigiPaAm } from './gasClient'
 import { buildSearchQueries, pickBestTicker, scoreYahooHit } from './tickerMatch'
 import { lookupSeedTicker } from './tickerSeed'
 
@@ -42,5 +43,12 @@ describe('ticker matching', () => {
     expect(scoreYahooHit(hits[1], 'DASSAULT AVIATION')).toBeGreaterThan(
       scoreYahooHit(hits[2], 'DASSAULT AVIATION'),
     )
+  })
+
+  it('recognizes OpenFIGI Paris / Amsterdam venue codes', () => {
+    expect(isOpenFigiPaAm('PAR')).toBe(true)
+    expect(isOpenFigiPaAm('FP')).toBe(true)
+    expect(isOpenFigiPaAm('NA')).toBe(true)
+    expect(isOpenFigiPaAm('US')).toBe(false)
   })
 })

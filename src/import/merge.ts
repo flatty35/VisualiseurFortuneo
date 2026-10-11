@@ -13,9 +13,7 @@ import {
 } from '@/domain/flatAdapters'
 import { ensureEnvelope } from '@/persist/db'
 import { loadPortfolio, savePortfolio } from '@/persist/portfolioStore'
-import {
-  reconstructVirtualOpening,
-} from './reconstructBackward'
+import { reconstructVirtualOpening } from './reconstructBackward'
 import { extractCashFromPositions } from './positionsXls'
 import { assignSupportKeys, buildNameToIsin } from './resolveIsin'
 import { applySeedMatches } from '@/quotes/tickerMatch'
@@ -24,7 +22,6 @@ import { ensureHistoricalSupports } from './ensureHistoricalSupports'
 export async function mergeImport(input: {
   envelope: EnvelopeType
   titresOps: Operation[]
-  especesOps: Operation[]
   positions: ParsedPosition[]
   currentCash?: number
 }): Promise<ImportReport> {
@@ -49,18 +46,21 @@ export async function mergeImport(input: {
     )
   }
 
-  const especesOps = input.especesOps
-  const incoming = [...titresOps, ...especesOps]
+  warnings.push(
+    'Cash : pas de poche cumulative — chaque achat compte comme un apport (argent investi ce jour-là). Le solde espèces saisi n’apparaît qu’en fin de période. Les ventes comptent comme retraits pour le TRI.',
+  )
 
   const portfolio = await loadPortfolio()
   const env = portfolio.getOrCreateEnvelope(envelopeTypeToKind(envelope))
 
-  // Drop previous synthetic seeds before recompute
-  env.operations = env.operations.filter((o) => !o.synthetic)
+  // Drop synthetic seeds + legacy espèces ledger (supportUniqueID === 0)
+  env.operations = env.operations.filter(
+    (o) => !o.synthetic && o.supportUniqueID > 0,
+  )
 
   const existingFp = new Set(env.operations.map((o) => o.fingerprint))
-  const fresh = incoming.filter((o) => !existingFp.has(o.fingerprint))
-  const skippedDuplicates = incoming.length - fresh.length
+  const fresh = titresOps.filter((o) => !existingFp.has(o.fingerprint))
+  const skippedDuplicates = titresOps.length - fresh.length
 
   mergeFlatOpsIntoPortfolio(portfolio, envelope, fresh)
 
@@ -113,7 +113,6 @@ export async function mergeImport(input: {
     warnings.push(`${seeded} ticker(s) associés via table locale.`)
   }
 
-  // Reload after seed matches (applySeedMatches writes via portfolio store)
   let portfolio2 = await loadPortfolio()
 
   if (positions.length === 0) {
@@ -137,12 +136,33 @@ export async function mergeImport(input: {
 
   if (cashFromPos === undefined && input.currentCash === undefined) {
     warnings.push(
-      'Espèces actuelles absentes des positions — hypothèse 0 € (la poche ne sera pas négative en fin de période).',
+      'Espèces actuelles absentes des positions — hypothèse 0 € (saisir le solde cash pour caler la fin de période).',
     )
   }
 
+  // Align LOCAL→ISIN **before** virtual opening — otherwise open positions
+  // stay at "current" qty while history replays on another key (~2× valo).
+  const hist = await ensureHistoricalSupports()
+  supportsCreated += hist.supportsCreated
+  if (hist.opsUpdated) {
+    warnings.push(
+      `${hist.opsUpdated} opération(s) historiques rattachées à un support (ISIN ou clé locale).`,
+    )
+  }
+  if (hist.supportsCreated) {
+    warnings.push(
+      `${hist.supportsCreated} support(s) créés pour l’historique (titres sortis inclus).`,
+    )
+  }
+  if (hist.migratedToRealIsin) {
+    warnings.push(
+      `${hist.migratedToRealIsin} support(s) locaux migrés vers un vrai ISIN.`,
+    )
+  }
+
+  portfolio2 = await loadPortfolio()
   const opsForReconstruct = projectPortfolio(portfolio2).operations.filter(
-    (o) => o.envelope === envelope && !o.synthetic,
+    (o) => o.envelope === envelope && !o.synthetic && !!o.isin,
   )
 
   const virtualOpening = reconstructVirtualOpening({
@@ -152,33 +172,9 @@ export async function mergeImport(input: {
     currentCash,
   })
 
-  if (virtualOpening.cash < 0) {
-    warnings.push(
-      `Ouverture virtuelle espèces = ${virtualOpening.cash.toFixed(2)} € (compte déjà investi avant l’historique Fortuneo) — normal si le PEA existait avant la fenêtre.`,
-    )
-  }
-
   applyVirtualOpeningSeeds(portfolio2, virtualOpening)
   await savePortfolio(portfolio2)
   await ensureEnvelope(envelope)
-
-  const hist = await ensureHistoricalSupports()
-  supportsCreated += hist.supportsCreated
-  if (hist.opsUpdated) {
-    warnings.push(
-      `${hist.opsUpdated} opération(s) historiques rattachées à un support (ISIN ou clé locale).`,
-    )
-  }
-
-  portfolio2 = await loadPortfolio()
-  const unmapped = projectPortfolio(portfolio2).supports.filter(
-    (s) => !s.yahooTicker && s.staticPrice === undefined,
-  )
-  if (unmapped.length) {
-    warnings.push(
-      `${unmapped.length} support(s) sans ticker Yahoo ni prix fixe — utilisez Correspondances.`,
-    )
-  }
 
   return {
     envelope,
