@@ -115,10 +115,16 @@ export function normalizeMatchKey(name: string): string {
 
 export function lookupSeedTicker(name: string): string | undefined {
   const key = normalizeMatchKey(name)
+  if (!key) return undefined
   if (TICKER_SEED[key]) return TICKER_SEED[key]
-  // fuzzy contains
+
+  // Fuzzy: seed key must be long enough and match as a whole-word phrase
+  // inside the name (never short keys like "asml" via reverse includes).
   for (const [k, t] of Object.entries(TICKER_SEED)) {
-    if (key.includes(k) || k.includes(key)) return t
+    if (k.length < 8) continue
+    if (key === k) return t
+    // word-boundary-ish: seed appears as contiguous tokens in the name
+    if (` ${key} `.includes(` ${k} `)) return t
   }
   return undefined
 }

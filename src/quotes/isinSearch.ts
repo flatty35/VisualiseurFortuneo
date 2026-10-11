@@ -10,10 +10,14 @@ import {
   scoreYahooHit,
 } from './tickerMatch'
 import {
+  fortuneoHitAcceptable,
   guessYahooTicker,
   pickBestFortuneoHit,
+  resolveYahooTickerFromFortuneoHit,
+  scoreFortuneoHit,
   searchFortuneoFirstHit,
 } from './fortuneoSearch'
+import { nameMatchBonus, usListingPenalty } from './nameMatch'
 import { isValidIsin } from '@/persist/rekeySupport'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import type { Support } from '@/domain/types'
@@ -239,28 +243,8 @@ export function scoreIsinHit(h: IsinSearchHit, name: string): number {
   if (h.investmentType === 'EQ') score += 25
   if (h.ticker?.endsWith('.PA')) score += 30
   if ((h.isin || '').toUpperCase().startsWith('FR')) score += 20
-  if ((h.isin || '').toUpperCase().startsWith('US')) score -= 25
-
-  const label = name
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-  const hitName = (h.name || '')
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-  if (hitName && label) {
-    if (hitName === label) score += 60
-    else if (hitName.includes(label) || label.includes(hitName)) score += 40
-    else {
-      const parts = label.split(' ').filter((w) => w.length > 2)
-      score += parts.filter((w) => hitName.includes(w)).length * 10
-    }
-  }
+  score += usListingPenalty(h.isin, h.ticker)
+  score += nameMatchBonus(name, h.name || '')
   return score
 }
 
@@ -431,12 +415,13 @@ export async function searchIsinCandidates(input: {
   const errors: string[] = []
   const queries = buildSearchQueries(name)
 
-  // Prefer full Yahoo ticker first (IBE.MC) so GAS can hit Boursorama Madrid/etc.
+  // Prefer exchange-qualified Yahoo ticker first (IBE.MC). Never promote bare
+  // symbols (IBE) — they collide across venues and poison Fortuneo/Yahoo search.
   if (input.yahooTicker?.trim()) {
     const yt = input.yahooTicker.trim()
-    if (!queries.includes(yt)) queries.unshift(yt)
-    const bareTicker = yt.replace(/\.[A-Za-z]{1,4}$/, '')
-    if (bareTicker && !queries.includes(bareTicker)) queries.splice(1, 0, bareTicker)
+    if (/\.[A-Za-z]{1,4}$/.test(yt) && !queries.includes(yt)) {
+      queries.unshift(yt)
+    }
   }
 
   const localQueryCap = batch ? 2 : 3
@@ -506,7 +491,7 @@ export async function searchIsinCandidates(input: {
     }
   }
 
-  // 0) Fortuneo Accès Marchés — first guess; stop cascade on hit
+  // 0) Fortuneo Accès Marchés — ingest always; early-stop only on quality gate
   {
     const { hits, debug: ftDebug } = await searchFortuneoFirstHit({
       name,
@@ -516,28 +501,40 @@ export async function searchIsinCandidates(input: {
     debug.push(...ftDebug)
     if (hits.length) {
       const best = pickBestFortuneoHit(hits, name)
+      const bestResolved = best
+        ? await resolveYahooTickerFromFortuneoHit(best)
+        : {}
       for (const h of hits) {
         const isin = (h.codeIsin || '').toUpperCase()
         if (!isValidIsin(isin)) continue
-        const yahoo = guessYahooTicker(h)
-        // Broker hit = high confidence (auto-resolve threshold)
-        const base = h === best ? 220 : 180
+        const yahoo =
+          h === best
+            ? bestResolved.ticker ?? guessYahooTicker(h)
+            : guessYahooTicker(h)
         pushIsin(map, {
           isin,
           name: h.libelle || name,
           ticker: yahoo,
           exch: h.place,
           quoteType: h.type,
-          score: base,
+          score: scoreFortuneoHit(h, name),
           source: 'fortuneo',
         })
       }
+      if (fortuneoHitAcceptable(best, name)) {
+        debug.push({
+          phase: 'fortuneo-stop',
+          ok: true,
+          detail: `arrêt cascade — ISIN Fortuneo ${best?.codeIsin || hits[0].codeIsin}`,
+        })
+        return finishReport()
+      }
       debug.push({
-        phase: 'fortuneo-stop',
-        ok: true,
-        detail: `arrêt cascade — ISIN Fortuneo ${best?.codeIsin || hits[0].codeIsin}`,
+        phase: 'fortuneo-weak',
+        ok: false,
+        detail:
+          'hit Fortuneo faible (qualité nominale / US) — cascade continue',
       })
-      return finishReport()
     }
   }
 

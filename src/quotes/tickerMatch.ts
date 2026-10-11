@@ -8,10 +8,17 @@ import {
   type YahooSearchHit,
 } from './gasClient'
 import {
-  guessYahooTicker,
+  fortuneoHitAcceptable,
   pickBestFortuneoHit,
+  resolveYahooTickerFromFortuneoHit,
   searchFortuneoFirstHit,
 } from './fortuneoSearch'
+import {
+  isQualifiedYahooTicker,
+  nameMatchBonus,
+  NAME_STOP_WORDS,
+  usListingPenalty,
+} from './nameMatch'
 import { lookupSeedTicker, normalizeMatchKey } from './tickerSeed'
 
 export interface MatchResult {
@@ -29,33 +36,7 @@ export type MatchProgress = (info: {
   status: string
 }) => void
 
-const STOP_WORDS = new Set([
-  'sa',
-  'se',
-  'sas',
-  'nv',
-  'plc',
-  'ag',
-  'ltd',
-  'inc',
-  'the',
-  'and',
-  'et',
-  'de',
-  'du',
-  'des',
-  'la',
-  'le',
-  'les',
-  'ucits',
-  'etf',
-  'acc',
-  'dis',
-  'eur',
-  'class',
-  'part',
-  'actions',
-])
+const STOP_WORDS = NAME_STOP_WORDS
 
 /** Clean Fortuneo label for search queries. ISIN first when available (Yahoo accepts it). */
 export function buildSearchQueries(name: string, isin?: string): string[] {
@@ -103,25 +84,20 @@ export function scoreYahooHit(hit: YahooSearchHit, name: string): number {
 
   let score = 0
   if (symbol.endsWith('.PA')) score += 50
-  else if (/\.(AS|BR|MI|MC|DE|F|WA|LS|SW)$/.test(symbol)) score += 15
+  else if (/\.(AS|BR|MI|MC|DE|F|WA|LS|SW|CO|ST|OL|VI|HE)$/.test(symbol))
+    score += 20
+  else if (!symbol.includes('.')) score -= 25
 
   if (qt === 'EQUITY') score += 10
   if (qt === 'ETF' || qt === 'MUTUALFUND') score += 8
 
-  const label = normalizeLabel(name)
   const shortn = normalizeLabel(hit.shortname || '')
   const longn = normalizeLabel(hit.longname || '')
-  const names = [shortn, longn].filter(Boolean)
-
-  for (const n of names) {
-    if (n === label) score += 80
-    else if (n.includes(label) || label.includes(n)) score += 45
-    else {
-      const parts = label.split(' ').filter((w) => w.length > 3)
-      const hits = parts.filter((w) => n.includes(w)).length
-      score += hits * 12
-    }
-  }
+  const bestName = [shortn, longn].filter(Boolean).sort((a, b) => {
+    return nameMatchBonus(name, b) - nameMatchBonus(name, a)
+  })[0]
+  if (bestName) score += nameMatchBonus(name, bestName)
+  score += usListingPenalty(hit.isin, symbol)
 
   // Penalize warrants / crazy symbols
   if (/[-=]/.test(symbol) && !symbol.includes('.')) score -= 20
@@ -202,7 +178,7 @@ export async function resolveTickerForSupport(
     }
   }
 
-  // 1) Fortuneo Accès Marchés
+  // 1) Fortuneo Accès Marchés — place map, else probe Yahoo suffixes
   {
     const queries = buildSearchQueries(support.name, support.isin)
     const { hits, query } = await searchFortuneoFirstHit({
@@ -210,14 +186,17 @@ export async function resolveTickerForSupport(
       queries,
     })
     const best = pickBestFortuneoHit(hits, support.name)
-    const yahoo = best ? guessYahooTicker(best) : undefined
-    if (yahoo) {
-      return {
-        isin: support.isin,
-        name: support.name,
-        ticker: yahoo,
-        source: 'fortuneo',
-        detail: `q=${query || support.name} isin=${best?.codeIsin || ''}`,
+    if (best && fortuneoHitAcceptable(best, support.name)) {
+      const resolved = await resolveYahooTickerFromFortuneoHit(best)
+      const yahoo = resolved.ticker
+      if (yahoo && isQualifiedYahooTicker(yahoo)) {
+        return {
+          isin: support.isin,
+          name: support.name,
+          ticker: yahoo,
+          source: 'fortuneo',
+          detail: `q=${query || support.name} isin=${best.codeIsin || ''} ${resolved.detail || ''}`.trim(),
+        }
       }
     }
   }
@@ -384,7 +363,7 @@ export async function searchTickerCandidates(input: {
     }
   }
 
-  // Fortuneo — if hit, keep as primary guess and skip Yahoo/OpenFIGI
+  // Fortuneo — place map or suffix probe; early-stop on quality gate
   {
     input.onStatus?.('Fortuneo…')
     const { hits, query } = await searchFortuneoFirstHit({
@@ -393,21 +372,30 @@ export async function searchTickerCandidates(input: {
       onStatus: input.onStatus,
     })
     const best = pickBestFortuneoHit(hits, name)
-    const yahoo = best ? guessYahooTicker(best) : undefined
-    if (yahoo) {
-      upsert(
-        {
-          symbol: yahoo,
-          shortname: best?.libelle || name,
-          quoteType: best?.type || 'EQUITY',
-          exch: best?.place,
-        },
-        'fortuneo',
-        query || name,
-        60,
-      )
-      const candidates = [...bySymbol.values()].sort((a, b) => b.score - a.score)
-      return { queries, candidates }
+    if (best) {
+      input.onStatus?.('Fortuneo → Yahoo (place / search / probe)…')
+      const resolved = await resolveYahooTickerFromFortuneoHit(best)
+      const yahoo = resolved.ticker
+      if (yahoo && isQualifiedYahooTicker(yahoo)) {
+        const strong = fortuneoHitAcceptable(best, name)
+        upsert(
+          {
+            symbol: yahoo,
+            shortname: best.libelle || name,
+            quoteType: best.type || 'EQUITY',
+            exch: best.place,
+          },
+          'fortuneo',
+          `${query || name}${resolved.detail ? ` · ${resolved.detail}` : ''}`,
+          strong ? 60 : 15,
+        )
+        if (strong) {
+          const candidates = [...bySymbol.values()].sort(
+            (a, b) => b.score - a.score,
+          )
+          return { queries, candidates }
+        }
+      }
     }
   }
 

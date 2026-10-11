@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { EnvelopeType } from '@/domain/types'
+import { clearAllData } from '@/persist/db'
 import { loadProjected } from '@/persist/portfolioStore'
 import { buildHoldingsSeries } from '@/engine/positions'
 import { computePortfolioTri } from '@/engine/tri'
@@ -22,7 +24,9 @@ function fmtTriPct(irr: number): string {
 }
 
 export default function DashboardPage() {
-  const { data, loading } = useAsyncData(async () => {
+  const [resetting, setResetting] = useState(false)
+  const [resetMsg, setResetMsg] = useState<string | null>(null)
+  const { data, loading, reload } = useAsyncData(async () => {
     const [{ envelopes, operations, supports, virtualOpenings }, quotes] =
       await Promise.all([loadProjected(), getAllQuoteMaps()])
 
@@ -74,6 +78,31 @@ export default function DashboardPage() {
     }
   }, [])
 
+  const onResetAll = async () => {
+    const ok = confirm(
+      'Réinitialiser tout le visualiseur ?\n\n' +
+        'Cela efface définitivement dans ce navigateur :\n' +
+        '• opérations et positions (PEA / PEA-PME / CTO)\n' +
+        '• correspondances ISIN / tickers\n' +
+        '• cache de cours\n\n' +
+        'Cette action est irréversible (exportez avant si besoin).',
+    )
+    if (!ok) return
+    const again = confirm('Confirmer l’effacement complet ?')
+    if (!again) return
+    setResetting(true)
+    setResetMsg(null)
+    try {
+      await clearAllData()
+      setResetMsg('Visualiseur réinitialisé — vous pouvez réimporter.')
+      reload()
+    } catch (e) {
+      setResetMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResetting(false)
+    }
+  }
+
   return (
     <div>
       <section className="panel" style={{ marginBottom: '1rem' }}>
@@ -91,10 +120,23 @@ export default function DashboardPage() {
           <Link className="btn" to="/charts">
             Voir les graphiques
           </Link>
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={resetting}
+            onClick={onResetAll}
+          >
+            {resetting ? 'Réinitialisation…' : 'Tout réinitialiser'}
+          </button>
           {!isProxyConfigured() && (
             <span className="badge warn">Proxy cours non configuré</span>
           )}
         </div>
+        {resetMsg && (
+          <p className="muted" style={{ margin: '0.75rem 0 0', fontSize: '0.9rem' }}>
+            {resetMsg}
+          </p>
+        )}
       </section>
 
       {loading && <p className="muted">Chargement…</p>}
