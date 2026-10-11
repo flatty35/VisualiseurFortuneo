@@ -18,6 +18,30 @@ describe('nameCoverage / quality gate', () => {
     )
   })
 
+  it('rejects Amundi S&P 500 without PEA when query is PEA share class', () => {
+    expect(
+      passesNameQualityGate(
+        'Amundi PEA SP 500 UCITS ETF Acc',
+        'Amundi Index Solutions - Amundi S&P 500 UCITS ETF',
+      ),
+    ).toBe(false)
+  })
+
+  it('keeps trailing share-class C as a significant token', () => {
+    expect(
+      passesNameQualityGate(
+        'Tailor Actions Entrepreneurs C',
+        'TAILOR ACTIONS ENTREPRENEURS I',
+      ),
+    ).toBe(false)
+    expect(
+      passesNameQualityGate(
+        'Tailor Actions Entrepreneurs C',
+        'Tailor Actions Entrepreneurs C',
+      ),
+    ).toBe(true)
+  })
+
   it('accepts a strong multi-token match', () => {
     expect(
       passesNameQualityGate('AIR LIQUIDE', 'AIR LIQUIDE SA'),

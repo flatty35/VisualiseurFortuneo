@@ -32,10 +32,52 @@ export const NAME_STOP_WORDS = new Set([
   'fonds',
 ])
 
+/** Trailing fund share-class letters kept even if length ≤ 2. */
+const SHARE_CLASS_TOKENS = new Set(['c', 'd', 'i', 'r', 'a', 'p', 'n'])
+
+/** Tokens that must appear in the hit when present in the query. */
+const CRITICAL_TOKENS = new Set(['pea', 'pme', 'banks', 'bank'])
+
 export function significantTokens(raw: string): string[] {
-  return normalizeMatchKey(raw)
-    .split(' ')
-    .filter((w) => w.length > 2 && !NAME_STOP_WORDS.has(w))
+  const parts = normalizeMatchKey(raw).split(' ').filter(Boolean)
+  const out: string[] = []
+  for (let i = 0; i < parts.length; i++) {
+    const w = parts[i]
+    if (NAME_STOP_WORDS.has(w)) continue
+    if (w.length > 2) {
+      out.push(w)
+      continue
+    }
+    // Keep trailing share class (… Entrepreneurs C)
+    if (SHARE_CLASS_TOKENS.has(w) && i === parts.length - 1) out.push(w)
+  }
+  return out
+}
+
+function tokenInHit(token: string, hitTokens: string[]): boolean {
+  return (
+    hitTokens.includes(token) ||
+    hitTokens.some((h) => h.includes(token) || token.includes(h))
+  )
+}
+
+/** Heavy penalty when PEA/PME/Banks (or share class) is in the query but missing in the hit. */
+export function criticalTokenPenalty(query: string, hitLabel: string): number {
+  const qTokens = significantTokens(query)
+  const hTokens = significantTokens(hitLabel)
+  let pen = 0
+  for (const t of qTokens) {
+    if (!CRITICAL_TOKENS.has(t) && !(SHARE_CLASS_TOKENS.has(t) && t.length <= 1)) {
+      continue
+    }
+    // share class: only last-token c/d/i already in qTokens
+    if (SHARE_CLASS_TOKENS.has(t) && t.length === 1) {
+      if (!tokenInHit(t, hTokens)) pen -= 50
+      continue
+    }
+    if (CRITICAL_TOKENS.has(t) && !tokenInHit(t, hTokens)) pen -= 70
+  }
+  return pen
 }
 
 export interface NameCoverage {
@@ -78,6 +120,7 @@ export function nameCoverage(query: string, hitLabel: string): NameCoverage {
  * (or ≥2 matched tokens when the query is long).
  */
 export function passesNameQualityGate(query: string, hitLabel: string): boolean {
+  if (criticalTokenPenalty(query, hitLabel) < 0) return false
   const { coverage, matched, total } = nameCoverage(query, hitLabel)
   if (total <= 1) return matched >= 1 || total === 0
   if (total >= 3) return matched >= 2 && coverage >= 0.45
@@ -104,6 +147,7 @@ export function nameMatchBonus(query: string, hitLabel: string): number {
   if (total >= 3 && matched <= 1) bonus = Math.min(bonus, 12)
   if (total >= 4 && coverage < 0.4) bonus = Math.min(bonus, 18)
 
+  bonus += criticalTokenPenalty(query, hitLabel)
   return bonus
 }
 

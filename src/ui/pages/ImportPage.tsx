@@ -3,12 +3,14 @@ import type { EnvelopeType, ImportReport } from '@/domain/types'
 import { parseTitresCsv } from '@/import/fortuneoTitres'
 import { parsePositionsFile } from '@/import/positionsXls'
 import { mergeImport } from '@/import/merge'
+import { isLocalSupportId } from '@/import/resolveIsin'
 import { autoResolveLocalIsins } from '@/quotes/isinSearch'
 import { autoMatchSupports } from '@/quotes/tickerMatch'
 import { isProxyConfigured } from '@/quotes/gasClient'
 import {
   clearEnvelopeOperations,
   listFlatSupports,
+  loadEnvelopeProjected,
 } from '@/persist/portfolioStore'
 
 const ENVELOPES: { value: EnvelopeType; label: string }[] = [
@@ -91,8 +93,18 @@ export default function ImportPage() {
 
       setProgressPct(50)
       setProgress('Résolution des ISIN locaux (titres sortis, préférence EUR)…')
+      // Scope to this envelope only — avoid re-resolving PEA when importing PEA-PME
+      const envProjected = await loadEnvelopeProjected(envelope)
+      const envIsins = new Set(
+        envProjected.operations
+          .map((o) => o.isin)
+          .filter((x): x is string => Boolean(x)),
+      )
+      const envLocals = (await listFlatSupports()).filter(
+        (s) => isLocalSupportId(s.isin) && envIsins.has(s.isin),
+      )
       if (isProxyConfigured() || import.meta.env.DEV) {
-        const isinR = await autoResolveLocalIsins(undefined, {
+        const isinR = await autoResolveLocalIsins(envLocals, {
           onProgress: (info) => {
             setProgress(
               `ISIN ${info.current}/${info.total} — ${info.name}${
@@ -114,7 +126,14 @@ export default function ImportPage() {
       setProgressPct(65)
       setProgress('Association des tickers Yahoo (peut prendre 1–2 min)…')
 
-      const pending = (await listFlatSupports()).filter((s) => !s.yahooTicker)
+      const envIsinsAfter = new Set(
+        (await loadEnvelopeProjected(envelope)).operations
+          .map((o) => o.isin)
+          .filter((x): x is string => Boolean(x)),
+      )
+      const pending = (await listFlatSupports()).filter(
+        (s) => !s.yahooTicker && envIsinsAfter.has(s.isin),
+      )
       if (pending.length === 0) {
         r.warnings.push('Tous les supports ont déjà un ticker.')
       } else if (!isProxyConfigured()) {

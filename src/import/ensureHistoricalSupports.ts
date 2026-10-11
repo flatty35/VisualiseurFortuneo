@@ -1,6 +1,9 @@
-import type { Operation } from '@/domain/types'
+import type { EnvelopeType, Operation } from '@/domain/types'
 import { AssetType } from '@/domain/portfolioModel'
-import { projectPortfolio } from '@/domain/flatAdapters'
+import {
+  kindToEnvelopeType,
+  projectPortfolio,
+} from '@/domain/flatAdapters'
 import { loadPortfolio, savePortfolio } from '@/persist/portfolioStore'
 import {
   assignSupportKeys,
@@ -23,6 +26,9 @@ let inflight: Promise<HistoricalSupportsReport> | null = null
  * Backfill supports + op.isin for historical titres that Fortuneo exports
  * without an ISIN in the libellé (label-only rows). Safe to run on every
  * import / Correspondances load.
+ *
+ * Name→ISIN remapping is **per envelope** so a PEA-PME resolve cannot
+ * rewrite PEA history (and vice versa).
  */
 export async function ensureHistoricalSupports(): Promise<HistoricalSupportsReport> {
   if (inflight) return inflight
@@ -35,62 +41,49 @@ export async function ensureHistoricalSupports(): Promise<HistoricalSupportsRepo
 async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport> {
   const portfolio = await loadPortfolio()
   const projected = projectPortfolio(portfolio)
-  const ops = projected.operations
-  const supports = projected.supports
-  const openings = projected.virtualOpenings
+  const supportMap = new Map(projected.supports.map((s) => [s.isin, s]))
 
-  const supportMap = new Map(supports.map((s) => [s.isin, s]))
-  const positions = openings.flatMap((vo) =>
-    vo.positions.map((p) => ({
+  let opsUpdated = 0
+  let migratedToRealIsin = 0
+  const remap = new Map<string, string>()
+  const finalById = new Map<string, Operation>()
+
+  const envelopes: EnvelopeType[] = portfolio.envelopes.map((e) =>
+    kindToEnvelopeType(e.kindName()),
+  )
+
+  for (const envType of envelopes) {
+    const envOps = projected.operations.filter((o) => o.envelope === envType)
+    if (!envOps.length) continue
+    const vo = projected.virtualOpenings.find((v) => v.envelope === envType)
+    const positions = (vo?.positions ?? []).map((p) => ({
       isin: p.isin,
       name: p.name,
       quantity: p.quantity,
-    })),
-  )
+    }))
 
-  const nameToIsin = buildNameToIsin(positions, ops)
-  for (const s of supports) {
-    if (!isLocalSupportId(s.isin)) {
-      nameToIsin.set(normalizeName(s.name), s.isin)
-    }
-  }
+    // Envelope-local only — never fold in other envelopes' supports/ISINs
+    const nameToIsin = buildNameToIsin(positions, envOps)
+    const keyed = assignSupportKeys(envOps, nameToIsin)
 
-  const keyed = assignSupportKeys(ops, nameToIsin)
-
-  let migratedToRealIsin = 0
-  const remap = new Map<string, string>()
-  for (const o of keyed) {
-    if (!o.isin || !o.name) continue
-    if (!isLocalSupportId(o.isin)) continue
-    const real = nameToIsin.get(normalizeName(o.name))
-    if (real && real !== o.isin) {
-      remap.set(o.isin, real)
-    }
-  }
-
-  const finalOps: Operation[] = keyed.map((o) => {
-    if (o.isin && remap.has(o.isin)) {
-      migratedToRealIsin++
-      return { ...o, isin: remap.get(o.isin)! }
-    }
-    if (o.isin && isLocalSupportId(o.isin) && o.name) {
-      const real = nameToIsin.get(normalizeName(o.name))
-      if (real && !isLocalSupportId(real)) {
-        migratedToRealIsin++
-        remap.set(o.isin, real)
-        return { ...o, isin: real }
+    for (const o of keyed) {
+      if (o.isin && isLocalSupportId(o.isin) && o.name) {
+        const real = nameToIsin.get(normalizeName(o.name))
+        if (real && real !== o.isin && !isLocalSupportId(real)) {
+          remap.set(o.isin, real)
+          migratedToRealIsin++
+          finalById.set(o.id, { ...o, isin: real })
+          continue
+        }
       }
+      finalById.set(o.id, o)
     }
-    return o
-  })
+  }
 
-  let opsUpdated = 0
-  for (let i = 0; i < ops.length; i++) {
-    const before = ops[i]
-    const after = finalOps[i]
+  for (const before of projected.operations) {
+    const after = finalById.get(before.id) ?? before
     if (before.isin === after.isin) continue
     opsUpdated++
-    // Update domain op customDetails + supportUniqueID
     for (const env of portfolio.envelopes) {
       const dop = env.operations.find((x) => x.id === before.id)
       if (!dop) continue
@@ -106,10 +99,9 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     }
   }
 
-  let supportsCreated = 0
   const beforeCount = Object.keys(portfolio.supports).length
   const seen = new Set<string>()
-  for (const o of finalOps) {
+  for (const o of finalById.values()) {
     if (!o.isin || !o.name) continue
     if (seen.has(o.isin)) continue
     seen.add(o.isin)
@@ -148,7 +140,7 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     }
   }
 
-  for (const o of finalOps) {
+  for (const o of finalById.values()) {
     if (!o.name || o.isin) continue
     const id = localSupportId(o.name)
     if (supportMap.has(id) || portfolio.findSupportByKey(id)) continue
@@ -170,20 +162,36 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
       if (!neu.boursoramaTicker) neu.boursoramaTicker = old.boursoramaTicker
       if (!neu.staticDatedValues.length)
         neu.staticDatedValues = old.staticDatedValues
-      // Remap ops still pointing at old support
+      // Only remap ops that were migrated to `to` (keep other envelopes intact
+      // if they still legitimately use a different key — supportUniqueID match
+      // after per-op update above already points at `neu` for migrated ops).
       for (const env of portfolio.envelopes) {
         for (const op of env.operations) {
           if (op.supportUniqueID === old.uniqueID) {
-            op.supportUniqueID = neu.uniqueID
+            const flatIsin =
+              typeof op.customDetails.isin === 'string'
+                ? op.customDetails.isin
+                : ''
+            if (flatIsin === to || flatIsin === from) {
+              op.supportUniqueID = neu.uniqueID
+              if (flatIsin === from) {
+                op.customDetails = { ...op.customDetails, isin: to }
+              }
+            }
           }
         }
       }
-      delete portfolio.supports[old.uniqueID]
-      supportMap.delete(from)
+      const stillUsed = portfolio.envelopes.some((env) =>
+        env.operations.some((op) => op.supportUniqueID === old.uniqueID),
+      )
+      if (!stillUsed) {
+        delete portfolio.supports[old.uniqueID]
+        supportMap.delete(from)
+      }
     }
   }
 
-  supportsCreated = Math.max(
+  const supportsCreated = Math.max(
     0,
     Object.keys(portfolio.supports).length - beforeCount,
   )

@@ -1,4 +1,15 @@
 /**
+ * Local seed label → real ISIN (preferred over Fortuneo/Yahoo guess).
+ * Names normalized at lookup time (same rules as TICKER_SEED).
+ */
+export const ISIN_SEED: Record<string, string> = {
+  'amundi pea sp 500 ucits etf acc': 'FR0011871128',
+  'amundi stoxx europe 600 banks ucits etf acc eur acc': 'LU1834983477',
+  'amundi stoxx europe 600 banks ucits etf acc': 'LU1834983477',
+  'tailor actions entrepreneurs c': 'FR0013333580',
+}
+
+/**
  * Local seed label → Yahoo ticker (Euronext .PA preferred).
  * Used before any network lookup. Names normalized at lookup time.
  */
@@ -30,8 +41,10 @@ export const TICKER_SEED: Record<string, string> = {
   'abionyx pharma': 'ABNX.PA',
   iberdrola: 'IBE.MC',
   'amundi stoxx europe 600 banks ucits etf acc eur acc': 'BNK.PA',
+  'amundi stoxx europe 600 banks ucits etf acc': 'BNK.PA',
   'amundi pea euro court terme ucits etf acc': 'OBLI.PA',
   'amundi pea japon topix ucits etf eur dis': 'PTPXE.PA',
+  'tailor actions entrepreneurs c': '0P0001E03F.F',
   'asml holding': 'ASML.AS',
   asml: 'ASML.AS',
   'air liquide': 'AI.PA',
@@ -113,18 +126,28 @@ export function normalizeMatchKey(name: string): string {
     .trim()
 }
 
-export function lookupSeedTicker(name: string): string | undefined {
+function lookupSeedMap(
+  map: Record<string, string>,
+  name: string,
+): string | undefined {
   const key = normalizeMatchKey(name)
   if (!key) return undefined
-  if (TICKER_SEED[key]) return TICKER_SEED[key]
+  if (map[key]) return map[key]
 
   // Fuzzy: seed key must be long enough and match as a whole-word phrase
   // inside the name (never short keys like "asml" via reverse includes).
-  for (const [k, t] of Object.entries(TICKER_SEED)) {
+  for (const [k, t] of Object.entries(map)) {
     if (k.length < 8) continue
     if (key === k) return t
-    // word-boundary-ish: seed appears as contiguous tokens in the name
     if (` ${key} `.includes(` ${k} `)) return t
   }
   return undefined
+}
+
+export function lookupSeedTicker(name: string): string | undefined {
+  return lookupSeedMap(TICKER_SEED, name)
+}
+
+export function lookupSeedIsin(name: string): string | undefined {
+  return lookupSeedMap(ISIN_SEED, name)
 }

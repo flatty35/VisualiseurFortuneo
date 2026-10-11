@@ -18,6 +18,7 @@ import {
   searchFortuneoFirstHit,
 } from './fortuneoSearch'
 import { nameMatchBonus, usListingPenalty } from './nameMatch'
+import { lookupSeedIsin, lookupSeedTicker } from './tickerSeed'
 import { isValidIsin } from '@/persist/rekeySupport'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import type { Support } from '@/domain/types'
@@ -63,6 +64,7 @@ export interface IsinCandidate {
   quoteType?: string
   score: number
   sources: Array<
+    | 'seed'
     | 'fortuneo'
     | 'morningstar'
     | 'boursorama'
@@ -415,9 +417,19 @@ export async function searchIsinCandidates(input: {
   const errors: string[] = []
   const queries = buildSearchQueries(name)
 
+  const seededIsin = lookupSeedIsin(name)
+  const seededTicker =
+    lookupSeedTicker(name) ||
+    (input.yahooTicker?.trim() &&
+    /\.[A-Za-z]{1,4}$/.test(input.yahooTicker.trim())
+      ? input.yahooTicker.trim()
+      : undefined)
+
   // Prefer exchange-qualified Yahoo ticker first (IBE.MC). Never promote bare
   // symbols (IBE) — they collide across venues and poison Fortuneo/Yahoo search.
-  if (input.yahooTicker?.trim()) {
+  if (seededTicker && !queries.includes(seededTicker)) {
+    queries.unshift(seededTicker)
+  } else if (input.yahooTicker?.trim()) {
     const yt = input.yahooTicker.trim()
     if (/\.[A-Za-z]{1,4}$/.test(yt) && !queries.includes(yt)) {
       queries.unshift(yt)
@@ -475,7 +487,7 @@ export async function searchIsinCandidates(input: {
       debug.push({
         phase: 'suggest',
         ok: true,
-        detail: `défaut ${suggested.isin} (score=${suggested.score}${suggested.eurListed ? ', EUR' : ''}${suggested.sources.includes('fortuneo') ? ', Fortuneo' : ''})`,
+        detail: `défaut ${suggested.isin} (score=${suggested.score}${suggested.eurListed ? ', EUR' : ''}${suggested.sources.includes('fortuneo') ? ', Fortuneo' : ''}${suggested.sources.includes('seed') ? ', seed' : ''})`,
       })
     }
     return {
@@ -489,6 +501,23 @@ export async function searchIsinCandidates(input: {
             'Aucun ISIN trouvé. En dev, vérifiez le proxy Vite /api/morningstar ; en prod, redéployez le GAS (OpenFIGI+Boursorama).'
           : undefined,
     }
+  }
+
+  // Local ISIN seed — authoritative for known PEA/fonds collisions
+  if (seededIsin && isValidIsin(seededIsin)) {
+    pushIsin(map, {
+      isin: seededIsin,
+      name,
+      ticker: seededTicker,
+      score: 250,
+      source: 'seed',
+    })
+    debug.push({
+      phase: 'isin-seed',
+      ok: true,
+      detail: `table locale → ${seededIsin}${seededTicker ? ` / ${seededTicker}` : ''}`,
+    })
+    return finishReport()
   }
 
   // 0) Fortuneo Accès Marchés — ingest always; early-stop only on quality gate
