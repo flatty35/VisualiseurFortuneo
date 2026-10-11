@@ -19,6 +19,10 @@ import {
  *
  * Titres-only cash model: opening cash = 0 (no cumulative pocket). Optional
  * currentCash is kept as reportedCash (idle cash today).
+ *
+ * Opening quantities are clamped to ≥ 0: a negative result means the
+ * reverse walk saw more buys than current+sells can explain (duplicate
+ * ops, mis-keyed ISIN, ignored loyalty lines, etc.) — never seed a short.
  */
 export function reconstructVirtualOpening(input: {
   envelope: EnvelopeType
@@ -53,7 +57,11 @@ export function reconstructVirtualOpening(input: {
 
   const sortedDesc = [...operations]
     .filter((o) => !o.synthetic)
-    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+    .sort(
+      (a, b) =>
+        (a.date < b.date ? 1 : a.date > b.date ? -1 : 0) ||
+        a.id.localeCompare(b.id),
+    )
 
   // Titres-only: do not reverse-walk a cash pile. Opening cash = 0;
   // idle cash today is reportedCash.
@@ -71,12 +79,12 @@ export function reconstructVirtualOpening(input: {
   }
 
   const openingPositions: VirtualOpeningPosition[] = [...qty.entries()]
-    .filter(([, v]) => Math.abs(v.quantity) > 1e-8)
-    .map(([isin, v]) => ({
-      isin,
-      name: v.name,
-      quantity: Math.round(v.quantity * 1e6) / 1e6,
-    }))
+    .map(([isin, v]) => {
+      // Never seed a short position — absorb reverse-walk inconsistencies.
+      const quantity = Math.max(0, Math.round(v.quantity * 1e6) / 1e6)
+      return { isin, name: v.name, quantity }
+    })
+    .filter((p) => p.quantity > 1e-8)
     .sort((a, b) => a.isin.localeCompare(b.isin))
 
   const dates = operations.map((o) => o.date).sort()
@@ -96,6 +104,10 @@ export function reconstructVirtualOpening(input: {
   }
 }
 
+/**
+ * Resolve op → ISIN for reverse walk. Exact normalized name only —
+ * fuzzy `includes` used to attach unrelated titles (and invent shorts).
+ */
 function resolveOpIsin(
   op: Operation,
   nameToIsin: Map<string, string>,
@@ -105,11 +117,11 @@ function resolveOpIsin(
     const key = normalizeName(op.name)
     const direct = nameToIsin.get(key)
     if (direct) return direct
-    for (const [n, i] of nameToIsin) {
-      if (!isLocalSupportId(i) && (key.includes(n) || n.includes(key))) return i
-    }
   }
-  return op.isin
+  // Keep LOCAL key if present so reverse walk stays on that lane
+  // (forward replay / ensureHistoricalSupports will align later).
+  if (op.isin && isLocalSupportId(op.isin)) return op.isin
+  return undefined
 }
 
 /** Build POSITION_SEED synthetic operations from a VirtualOpening. */

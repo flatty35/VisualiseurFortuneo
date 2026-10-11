@@ -46,13 +46,8 @@ function lookupIsin(
   name: string,
   nameToIsin: Map<string, string>,
 ): string | undefined {
-  const key = normalizeName(name)
-  let isin = nameToIsin.get(key)
-  if (isin) return isin
-  for (const [n, i] of nameToIsin) {
-    if (key.includes(n) || n.includes(key)) return i
-  }
-  return undefined
+  // Exact normalized name only — fuzzy includes mis-key unrelated titles.
+  return nameToIsin.get(normalizeName(name))
 }
 
 export function attachMissingIsins(

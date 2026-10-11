@@ -67,6 +67,12 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
 
   const ops: Operation[] = []
   let i = 0
+  // Fortuneo sometimes repeats an identical trade row (same date/qty/price).
+  // A bare content hash would collapse them on merge and invent short openings
+  // (e.g. VusionGroup −5). Suffix #n keeps duplicates distinct while staying
+  // stable across re-parse of the same file; the first row keeps the bare hash
+  // so existing stored ops still match on re-import.
+  const fpOccurrence = new Map<string, number>()
 
   for (const row of parsed.data) {
     const label = pick(row, 'libellé', 'libelle', 'Libellé')
@@ -93,7 +99,7 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
     const assetName = name || undefined
     // Fingerprint keeps the historical key (name-first). Stored label prefers the
     // Opération text so amortissement / OST wording remains available later.
-    const fingerprint = operationFingerprint({
+    const baseFp = operationFingerprint({
       envelope,
       date,
       type,
@@ -104,6 +110,9 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
       netAmount: net,
       label: label || operation,
     })
+    const occ = fpOccurrence.get(baseFp) ?? 0
+    fpOccurrence.set(baseFp, occ + 1)
+    const fingerprint = occ === 0 ? baseFp : `${baseFp}#${occ}`
     const storedLabel = operation?.trim()
       ? label?.trim()
         ? `${operation.trim()} · ${label.trim()}`

@@ -190,13 +190,15 @@ export function virtualOpeningFromEnvelope(
     .filter((o) => o.supportUniqueID > 0)
     .map((o) => {
       const s = portfolio.getSupport(o.supportUniqueID)
+      // Clamp shorts: reverse-walk / dedup bugs must not seed negative qty.
+      const quantity = Math.max(0, o.quantity)
       return {
         isin: s?.supportKey() ?? `ID:${o.supportUniqueID}`,
         name: s?.niceUniqueName ?? String(o.supportUniqueID),
-        quantity: o.quantity,
+        quantity,
       }
     })
-    .filter((p) => Math.abs(p.quantity) > 1e-8)
+    .filter((p) => p.quantity > 1e-8)
 
   const cashSeed = seeds.find((o) => o.supportUniqueID === 0)
   const date =

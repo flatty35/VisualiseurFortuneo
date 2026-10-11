@@ -27,6 +27,19 @@ describe('parseTitresText', () => {
     expect(a.map((o) => o.fingerprint)).toEqual(b.map((o) => o.fingerprint))
   })
 
+  it('keeps identical trade rows as distinct fingerprints', () => {
+    const csv = `libellé;Opération;Place;Date;Qté;Prix d'éxé;Montant brut;Courtage/Prélèvement;Montant net;Devise
+VUSIONGROUP;Vente comptant;Euronext Paris;13/04/2026;5.0;111.9;559.5;-2.79;556.71;EUR
+VUSIONGROUP;Vente comptant;Euronext Paris;13/04/2026;5.0;111.9;559.5;-2.79;556.71;EUR
+`
+    const ops = parseTitresText(csv, 'PEA_PME')
+    expect(ops).toHaveLength(2)
+    expect(ops[0].fingerprint).not.toBe(ops[1].fingerprint)
+    expect(ops[1].fingerprint.startsWith(`${ops[0].fingerprint}#`)).toBe(true)
+    const again = parseTitresText(csv, 'PEA_PME')
+    expect(again.map((o) => o.fingerprint)).toEqual(ops.map((o) => o.fingerprint))
+  })
+
   it('keeps Opération text in label for amortissement / OST', () => {
     const csv = `libellé;Opération;Place;Date;Qté;Prix d'éxé;Montant brut;Courtage/Prélèvement;Montant net;Devise;
 BPIFR.ENTR.3 A2 3D;OST de création de coupons - Détachement coupon amortissement;null;29/06/2026;20.0;0.0;227.4;0.0;227.4;EUR;
