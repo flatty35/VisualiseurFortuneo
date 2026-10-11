@@ -46,7 +46,6 @@ function dividendCash(op: Operation): number {
 }
 
 function seedUnitCost(
-  isin: string,
   date: string,
   support: Support | undefined,
   quotes: Map<string, QuoteBar[]>,
@@ -137,7 +136,7 @@ export function computePositionContributions(input: {
             toBusinessDay(o.date) === toBusinessDay(vo.date),
         )
         const day = toBusinessDay(vo.date)
-        const px = seedUnitCost(isin, day, support, input.quotes, seedOp)
+        const px = seedUnitCost(day, support, input.quotes, seedOp)
         if (px !== undefined && px > 0) {
           const cost = Math.abs(seedPos.quantity) * px
           invested += cost
@@ -186,7 +185,7 @@ export function computePositionContributions(input: {
         // Non-synthetic seed without VO (rare) — count as invested
         if (op.type === 'POSITION_SEED' && !op.synthetic) {
           const q = Math.abs(op.quantity ?? 0)
-          const px = seedUnitCost(isin, day, support, input.quotes, op)
+          const px = seedUnitCost(day, support, input.quotes, op)
           if (q > 1e-8 && px !== undefined && px > 0) {
             const cost = q * px
             invested += cost

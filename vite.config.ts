@@ -134,7 +134,10 @@ function morningstarDevProxy(): Plugin {
   }
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // GitHub Pages: https://flatty35.github.io/VisualiseurFortuneo/
+  // Dev keeps `/` so npm run dev stays on http://localhost:5173/
+  base: command === 'build' ? '/VisualiseurFortuneo/' : '/',
   plugins: [react(), tailwindcss(), morningstarDevProxy()],
   resolve: {
     alias: {
@@ -145,4 +148,4 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts'],
   },
-})
+}))
