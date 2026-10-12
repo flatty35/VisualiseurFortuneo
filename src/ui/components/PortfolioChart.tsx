@@ -162,21 +162,17 @@ export default function PortfolioChart({
     echarts.connect(ZOOM_SYNC_GROUP)
   }, [syncZoom, axisKey, option])
 
-  // External reset (period / envelope change → zoomRange null) without fighting
-  // live wheel zoom: only apply when parent clears or jumps the window.
+  // Parent jumps the window (period pill / envelope / double-click reset).
+  // Live wheel zoom is mirrored by echarts.connect; skip when already in sync.
   useEffect(() => {
     const chart = chartRef.current?.getEchartsInstance()
     if (!chart || !axisDatesRef.current.length || !syncZoom) return
     const dates = axisDatesRef.current
     const current = readZoomRange(chart, dates, periodRangeRef.current)
     if (sameZoom(current, zoomRange ?? null)) return
-    // Only force-apply full resets from the parent (null). Live zooms are
-    // mirrored by echarts.connect — re-applying them via setOption was resetting
-    // the peer chart to the default window.
-    if (zoomRange != null) return
     suppressEmit.current += 1
     try {
-      applyZoomToChart(chart, dates, null)
+      applyZoomToChart(chart, dates, zoomRange)
     } catch {
       // disposing
     }
@@ -283,7 +279,9 @@ export default function PortfolioChart({
         </div>
       )}
       <p className="muted" style={{ fontSize: '0.8rem', margin: '0 0 0.5rem' }}>
-        Molette = zoom · glisser = déplacer · double-clic = réinitialiser
+        Molette = zoom · glisser = déplacer · double-clic = tout l’historique
+        (les pastilles 1M / 3M / 1A / 2A cadrent la vue ; on peut dézoomer
+        jusqu’au maximum disponible)
         {onZoomRangeChange ? ' · zoom synchronisé entre les deux graphiques' : ''}
       </p>
       <ReactECharts
@@ -882,7 +880,14 @@ function buildOption(
       axisLine: { lineStyle: { color: 'rgba(232,240,235,0.2)' } },
       axisLabel: {
         color: '#9bb5a8',
-        formatter: (v: string) => v.replace('·abo', '').slice(2),
+        hideOverlap: true,
+        showMinLabel: true,
+        showMaxLabel: true,
+        formatter: (v: string) => {
+          const d = v.replace('·abo', '')
+          // YY-MM-DD keeps year visible on multi-year axes
+          return d.length >= 10 ? d.slice(2) : d
+        },
       },
     },
     yAxis: (() => {

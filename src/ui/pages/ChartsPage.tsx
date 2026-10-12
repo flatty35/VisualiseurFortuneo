@@ -119,18 +119,36 @@ export default function ChartsPage() {
   /** Date sous le curseur (onglet Valorisation) — défaut = fin de période. */
   const [pointerDate, setPointerDate] = useState<string | null>(null)
   const autoRefreshDone = useRef(false)
+  /** Full category axis (updated when the chart model rebuilds). */
+  const axisDatesRef = useRef<string[]>([])
+
+  /** Pastille = fenêtre de zoom initiale ; les séries gardent tout l’historique. */
+  const applyPeriodZoom = (p: ChartPeriod, dates: string[]) => {
+    if (!dates.length) {
+      setZoomRange(null)
+      return
+    }
+    const { from, to } = sliceByPeriod(dates, p)
+    // Fenêtre = tout l’axe → null (dézoom max), sinon crop partagé.
+    if (from <= dates[0] && to >= dates[dates.length - 1]) {
+      setZoomRange(null)
+    } else {
+      setZoomRange({ start: from, end: to })
+    }
+  }
 
   const setPeriodAndResetZoom = (p: ChartPeriod) => {
-    setZoomRange(null)
     setPeriod(p)
+    applyPeriodZoom(p, axisDatesRef.current)
   }
 
   useEffect(() => {
-    setZoomRange(null)
     setPointerDate(null)
     // Allow auto-refresh again when switching PEA ↔ PEA-PME ↔ CTO
     autoRefreshDone.current = false
-  }, [envelope, period])
+    applyPeriodZoom(period, axisDatesRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on envelope switch
+  }, [envelope])
 
   const onZoomRangeChange = (range: ZoomRange | null) => {
     setZoomRange((prev) => {
@@ -202,16 +220,18 @@ export default function ChartsPage() {
       if (!holdings.length) return null
 
       const allDates = holdings.map((h) => h.date)
+      const fullFrom = allDates[0]
+      const fullTo = allDates[allDates.length - 1]
+      // Pastilles 1M/3M/1A/2A = zoom initial ; l’axe garde tout l’historique
+      // pour pouvoir dézoomer jusqu’au maximum disponible.
       const { from, to } = sliceByPeriod(allDates, period)
-      const sliced = holdings.filter((h) => h.date >= from && h.date <= to)
-      const axisDates = sliced.map((h) => h.date)
-      const periodRange = { start: from, end: to }
+      const axisDates = allDates
+      const periodRange = { start: fullFrom, end: fullTo }
 
       const valuedParts = perEnvHoldings.map((hSeries, idx) => {
         const env = scopes[idx]
-        const partSliced = hSeries.filter((h) => h.date >= from && h.date <= to)
         return valueHoldingsSeries({
-          holdings: partSliced,
+          holdings: hSeries,
           supports: data.supports,
           quotes,
           operations: data.operations.filter((o) => o.envelope === env),
@@ -286,7 +306,7 @@ export default function ChartsPage() {
       /** Valorisation des titres sélectionnés — sans total */
       const positionValo: ChartSeries[] = []
       const holdingsByDate = new Map(
-        sliced.map((h) => [h.date, h] as const),
+        holdings.map((h) => [h.date, h] as const),
       )
       for (const isin of selectedIsins) {
         const s = data.supports.find((x) => x.isin === isin)
@@ -310,7 +330,10 @@ export default function ChartsPage() {
 
       const selectedSet = new Set(selectedIsins)
       const markers = buildOperationMarkers(data.operations).filter(
-        (m) => m.date >= from && m.date <= to && selectedSet.has(m.seriesId),
+        (m) =>
+          m.date >= fullFrom &&
+          m.date <= fullTo &&
+          selectedSet.has(m.seriesId),
       )
 
       const names: Record<string, string> = {}
@@ -325,8 +348,8 @@ export default function ChartsPage() {
         quotes,
         operations: data.operations,
         holdings,
-        from,
-        to,
+        from: fullFrom,
+        to: fullTo,
       }).map((s) => ({
         ...s,
         isPosition: true,
@@ -341,14 +364,15 @@ export default function ChartsPage() {
           supports: data.supports,
           quotes,
           days: axisDates,
-          from,
-          to,
+          from: fullFrom,
+          to: fullTo,
         })
         if (pru) priceCompare.push(pru)
 
-        const valuedPos = valued
-          .map((v) => ({ date: v.date, total: v.byIsin[isin] ?? 0 }))
-          .filter((v) => v.date >= from && v.date <= to)
+        const valuedPos = valued.map((v) => ({
+          date: v.date,
+          total: v.byIsin[isin] ?? 0,
+        }))
         const firstHeld = valuedPos.findIndex((v) => v.total > 1e-6)
         const triValued =
           firstHeld >= 0 ? valuedPos.slice(firstHeld) : []
@@ -500,13 +524,16 @@ export default function ChartsPage() {
         tickersMapped,
         tickersCached,
         lastTotal: valued[valued.length - 1]?.total ?? 0,
+        /** Fenêtre de la pastille (KPI TRI) — distincte du zoom graphique. */
         periodFrom: from,
         periodTo: to,
+        fullFrom,
+        fullTo,
         tri,
         calendarTris,
         externalNet,
         valued,
-        holdingsSliced: sliced,
+        holdingsSliced: holdings,
         names,
       }
     } catch (e) {
@@ -514,6 +541,21 @@ export default function ChartsPage() {
       return null
     }
   }, [data, period, selectedIsins])
+
+  // Keep axis dates for period-pill zoom; on first load / envelope reload open
+  // the selected period window (data stays full-history so zoom-out can expand).
+  useEffect(() => {
+    const dates = model?.axisDates ?? []
+    const prev = axisDatesRef.current
+    axisDatesRef.current = dates
+    if (!dates.length) return
+    const axisChanged =
+      prev.length !== dates.length ||
+      prev[0] !== dates[0] ||
+      prev[prev.length - 1] !== dates[dates.length - 1]
+    if (axisChanged) applyPeriodZoom(period, dates)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model?.axisDates])
 
   // Drop selections that are not in the current envelope's ISIN list
   useEffect(() => {
@@ -735,7 +777,8 @@ export default function ChartsPage() {
             <div className="charts-panel-head">
               <h2>Valorisation</h2>
               <span className="muted">
-                Portefeuille · {model.periodFrom} → {model.periodTo}
+                Portefeuille · {zoomRange?.start ?? model.fullFrom} →{' '}
+                {zoomRange?.end ?? model.fullTo}
               </span>
             </div>
             <div className="charts-tri-strip">
