@@ -1,6 +1,7 @@
 import type { EnvelopeType, Operation } from '@/domain/types'
 import { AssetType } from '@/domain/portfolioModel'
 import {
+  envelopeTypeToKind,
   kindToEnvelopeType,
   projectPortfolio,
 } from '@/domain/flatAdapters'
@@ -10,7 +11,8 @@ import {
   buildNameToIsin,
   isLocalSupportId,
   localSupportId,
-  normalizeName,
+  lookupIsin,
+  nameMatchKeys,
 } from './resolveIsin'
 import { applySeedMatches } from '@/quotes/tickerMatch'
 
@@ -62,13 +64,31 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
       quantity: p.quantity,
     }))
 
-    // Envelope-local only — never fold in other envelopes' supports/ISINs
+    // Envelope-local only — never fold in other envelopes' supports/ISINs.
+    // Index real-ISIN supports linked to this envelope (XLS holdings) so CSV
+    // names without « (MNEMO) » still resolve onto the known ISIN.
     const nameToIsin = buildNameToIsin(positions, envOps)
+    const env = portfolio.envelopeByKind(envelopeTypeToKind(envType))
+    if (env) {
+      const seenSid = new Set<number>()
+      for (const op of env.operations) {
+        if (op.supportUniqueID <= 0 || seenSid.has(op.supportUniqueID)) continue
+        seenSid.add(op.supportUniqueID)
+        const s = portfolio.getSupport(op.supportUniqueID)
+        if (!s) continue
+        const key = s.supportKey()
+        if (!key || isLocalSupportId(key)) continue
+        for (const nk of nameMatchKeys(s.niceUniqueName || key)) {
+          nameToIsin.set(nk, key)
+        }
+      }
+    }
+
     const keyed = assignSupportKeys(envOps, nameToIsin)
 
     for (const o of keyed) {
       if (o.isin && isLocalSupportId(o.isin) && o.name) {
-        const real = nameToIsin.get(normalizeName(o.name))
+        const real = lookupIsin(o.name, nameToIsin)
         if (real && real !== o.isin && !isLocalSupportId(real)) {
           remap.set(o.isin, real)
           migratedToRealIsin++

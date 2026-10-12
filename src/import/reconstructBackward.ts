@@ -10,7 +10,8 @@ import type {
 import {
   buildNameToIsin,
   isLocalSupportId,
-  normalizeName,
+  lookupIsin,
+  nameMatchKeys,
 } from './resolveIsin'
 
 /**
@@ -51,7 +52,9 @@ export function reconstructVirtualOpening(input: {
   const nameToIsin = buildNameToIsin(positions, operations)
   for (const p of positions) {
     if (p.isin && !isLocalSupportId(p.isin)) {
-      nameToIsin.set(normalizeName(p.name), p.isin)
+      for (const key of nameMatchKeys(p.name)) {
+        nameToIsin.set(key, p.isin)
+      }
     }
   }
 
@@ -114,8 +117,7 @@ function resolveOpIsin(
 ): string | undefined {
   if (op.isin && !isLocalSupportId(op.isin)) return op.isin
   if (op.name) {
-    const key = normalizeName(op.name)
-    const direct = nameToIsin.get(key)
+    const direct = lookupIsin(op.name, nameToIsin)
     if (direct) return direct
   }
   // Keep LOCAL key if present so reverse walk stays on that lane

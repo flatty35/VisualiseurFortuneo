@@ -12,8 +12,11 @@ async function loadPeaPme() {
     'testData/PEA-PME/HistoriqueOperationsBourse_016466511276.zip',
   )
   const zip = await JSZip.loadAsync(zipBuf)
-  const name = Object.keys(zip.files).find((n) => n.endsWith('.csv'))!
-  const text = await zip.files[name].async('string')
+  const name = Object.keys(zip.files).find(
+    (n) => n.endsWith('.csv') && !zip.files[n].dir,
+  )!
+  const bytes = await zip.files[name].async('uint8array')
+  const text = new TextDecoder('windows-1252').decode(bytes)
   const ops = parseTitresText(text, 'PEA_PME')
   const posBuf = readFileSync(
     'testData/PEA-PME/Export_portefeuille_detaille_016466511276.xls',

@@ -11,6 +11,26 @@ export function normalizeName(s: string): string {
 }
 
 /**
+ * Fortuneo XLS libellés look like « CIECHARGEURSINVEST (CRI) » while CSV
+ * ops are « CIECHARGEURSINVEST ». Matching keys bridge that gap without
+ * fuzzy substring includes (which mis-keyed unrelated titles).
+ */
+export function nameMatchKeys(s: string): string[] {
+  const keys = new Set<string>()
+  const add = (raw: string) => {
+    const n = normalizeName(raw)
+    if (!n) return
+    keys.add(n)
+    const compact = n.replace(/\s+/g, '')
+    if (compact) keys.add(compact)
+  }
+  add(s)
+  // Drop trailing « (MNEMO) » / « (ALMDT) »
+  add(s.replace(/\s*\([A-Za-z0-9./-]{1,12}\)\s*$/g, ''))
+  return [...keys]
+}
+
+/**
  * Stable synthetic key for titles that have no Fortuneo ISIN in the CSV
  * (common: libellé = "SAFRAN" only). Same approach as FortuneoPEAViewer
  * which keyed charts/mappings by libellé.
@@ -30,24 +50,30 @@ export function buildNameToIsin(
   ops: Operation[],
 ): Map<string, string> {
   const map = new Map<string, string>()
+  const put = (name: string, isin: string) => {
+    if (!isin || isLocalSupportId(isin)) return
+    for (const key of nameMatchKeys(name)) {
+      map.set(key, isin)
+    }
+  }
   for (const p of positions) {
-    if (!p.isin || isLocalSupportId(p.isin)) continue
-    map.set(normalizeName(p.name), p.isin)
+    if (p.isin) put(p.name, p.isin)
   }
   for (const o of ops) {
-    if (o.isin && o.name && !isLocalSupportId(o.isin)) {
-      map.set(normalizeName(o.name), o.isin)
-    }
+    if (o.isin && o.name) put(o.name, o.isin)
   }
   return map
 }
 
-function lookupIsin(
+export function lookupIsin(
   name: string,
   nameToIsin: Map<string, string>,
 ): string | undefined {
-  // Exact normalized name only — fuzzy includes mis-key unrelated titles.
-  return nameToIsin.get(normalizeName(name))
+  for (const key of nameMatchKeys(name)) {
+    const isin = nameToIsin.get(key)
+    if (isin && !isLocalSupportId(isin)) return isin
+  }
+  return undefined
 }
 
 export function attachMissingIsins(

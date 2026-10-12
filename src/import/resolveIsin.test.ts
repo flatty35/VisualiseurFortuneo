@@ -49,4 +49,35 @@ describe('assignSupportKeys', () => {
     const safran = keyed.filter((o) => o.name === 'SAFRAN')
     expect(safran.every((o) => o.isin === 'FR0000073272')).toBe(true)
   })
+
+  it('matches CSV name to XLS libellé with Fortuneo (MNEMO) suffix', () => {
+    const csv = `libellé;Opération;Place;Date;Qté;Prix d'éxé;Montant brut;Courtage/Prélèvement;Montant net;Devise
+CIECHARGEURSINVEST;Achat Comptant;Euronext Paris;06/10/2026;12.0;7.57;-90.84;-0.45;-91.29;EUR
+MEDIANTECHNOLOGIES;Achat Comptant;Euronext Paris;02/10/2026;220.0;3.27;-719.4;-3.59;-722.99;EUR
+`
+    const ops = parseTitresText(csv, 'PEA_PME')
+    const map = buildNameToIsin(
+      [
+        {
+          isin: 'FR0000130692',
+          name: 'CIECHARGEURSINVEST (CRI)',
+          quantity: 105,
+        },
+        {
+          isin: 'FR0011049824',
+          name: 'MEDIANTECHNOLOGIES (ALMDT)',
+          quantity: 1000,
+        },
+      ],
+      [],
+    )
+    const keyed = assignSupportKeys(ops, map)
+    expect(
+      keyed.find((o) => o.name === 'CIECHARGEURSINVEST')?.isin,
+    ).toBe('FR0000130692')
+    expect(
+      keyed.find((o) => o.name === 'MEDIANTECHNOLOGIES')?.isin,
+    ).toBe('FR0011049824')
+    expect(keyed.every((o) => o.isin && !isLocalSupportId(o.isin))).toBe(true)
+  })
 })
