@@ -24,6 +24,7 @@ import {
 import {
   clipInactivePositionValues,
   mergeValuedSeries,
+  quoteKeyForSupport,
   sliceByPeriod,
   valueHoldingsSeries,
 } from '@/engine/valuation'
@@ -31,7 +32,6 @@ import {
   getAllQuoteMaps,
   refreshQuotesForSupports,
 } from '@/quotes/localQuoteCache'
-import { isProxyConfigured } from '@/quotes/gasClient'
 import { useAsyncData } from '@/ui/hooks/useLiveQuery'
 import { ensureHistoricalSupports } from '@/import/ensureHistoricalSupports'
 import PortfolioChart, {
@@ -436,10 +436,11 @@ export default function ChartsPage() {
           return a.name.localeCompare(b.name, 'fr')
         })
       const scopeSupports = data.supports.filter((s) => allIsins.has(s.isin))
-      const tickersMapped = scopeSupports.filter((s) => s.yahooTicker).length
-      const tickersCached = scopeSupports.filter(
-        (s) => s.yahooTicker && (quotes.get(s.yahooTicker)?.length ?? 0) > 0,
-      ).length
+      const tickersMapped = scopeSupports.filter((s) => quoteKeyForSupport(s)).length
+      const tickersCached = scopeSupports.filter((s) => {
+        const key = quoteKeyForSupport(s)
+        return key && (quotes.get(key)?.length ?? 0) > 0
+      }).length
 
       const tri =
         data.scope === 'ALL'
@@ -626,15 +627,13 @@ export default function ChartsPage() {
 
   useEffect(() => {
     if (!data || !model || autoRefreshDone.current || refreshing) return
-    if (!isProxyConfigured()) return
-    const scopeSupports = model.scopeSupports
-    const mapped = scopeSupports.filter((s) => s.yahooTicker)
-    if (!mapped.length) return
-    // Refresh if any scoped ticker lacks a usable series (not "some PEA already cached")
-    const needsFetch = mapped.some((s) => {
-      const bars = data.quotes.get(s.yahooTicker!) ?? []
-      return bars.length < 40
-    })
+    // Morningstar history needs no proxy; only a quote key (ticker or ISIN)
+    const keys = model.scopeSupports
+      .map((s) => quoteKeyForSupport(s))
+      .filter((k): k is string => Boolean(k))
+    if (!keys.length) return
+    // Refresh if any scoped title lacks a usable series (not "some PEA already cached")
+    const needsFetch = keys.some((k) => (data.quotes.get(k)?.length ?? 0) < 40)
     if (!needsFetch) return
     autoRefreshDone.current = true
     void onRefreshQuotes()
@@ -767,9 +766,9 @@ export default function ChartsPage() {
                 <div>
                   {fmtEur(model.externalNet.net)}
                   <span className="muted" style={{ marginLeft: 6 }}>
-                    ({model.externalNet.count} ordres
+                    ({model.externalNet.count} flux
                     {model.externalNet.retraits > 0
-                      ? ` · ventes −${fmtEur(model.externalNet.retraits)}`
+                      ? ` · ventes et dividendes −${fmtEur(model.externalNet.retraits)}`
                       : ''}
                     )
                   </span>
@@ -787,7 +786,7 @@ export default function ChartsPage() {
                 className="badge warn"
                 style={{ display: 'block', marginBottom: 8 }}
               >
-                Aucun historique Yahoo en cache — « Rafraîchir cours ».
+                Aucun historique de cours en cache — « Rafraîchir cours ».
               </div>
             )}
             <div className="charts-valo-split">
@@ -1054,7 +1053,7 @@ export default function ChartsPage() {
                   className="badge warn"
                   style={{ display: 'block', marginBottom: 8 }}
                 >
-                  Aucun historique Yahoo en cache — « Rafraîchir cours ».
+                  Aucun historique de cours en cache — « Rafraîchir cours ».
                 </div>
               )}
               {selectedIsins.length === 0 ? (

@@ -1,4 +1,4 @@
-import {
+﻿import {
   isProxyConfigured,
   searchIsinProxyDetailed,
   searchYahoo,
@@ -6,7 +6,6 @@ import {
 } from './gasClient'
 import {
   buildSearchQueries,
-  googleTickerFromYahoo,
   scoreYahooHit,
 } from './tickerMatch'
 import {
@@ -20,40 +19,13 @@ import {
 import { nameMatchBonus, usListingPenalty } from './nameMatch'
 import { lookupSeedIsin, lookupSeedTicker } from './tickerSeed'
 import { isValidIsin } from '@/persist/rekeySupport'
-import { isLocalSupportId } from '@/import/resolveIsin'
-import type { Support } from '@/domain/types'
-import {
-  listFlatSupports,
-  updatePortfolio,
-} from '@/persist/portfolioStore'
-import { AssetType, GetterType } from '@/domain/portfolioModel'
+import { searchMorningstar } from './morningstarScreener'
 
 /** Let the browser paint React progress between network-bound steps. */
 function yieldToUi(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0)
   })
-}
-
-async function withDeadline<T>(
-  ms: number,
-  label: string,
-  work: () => Promise<T>,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      work(),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Timeout ${label} (${ms}ms)`)),
-          ms,
-        )
-      }),
-    ])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
 }
 
 export interface IsinCandidate {
@@ -268,130 +240,44 @@ export function pickBestIsinCandidate(
 /** Minimum score to auto-apply without asking (EUR name match). */
 export const AUTO_ISIN_SCORE_MIN = 120
 
-/**
- * Morningstar via Vite dev proxy (browser → localhost → Morningstar).
- * Avoids GAS IP 403. Only available when `npm run dev` proxy is up.
- */
-let morningstarWarmed = false
-
-export async function searchIsinMorningstarLocal(
+/** Morningstar screener, called directly from the browser (CORS *). */
+export async function searchIsinMorningstar(
   query: string,
-  options?: { maxAttempts?: number },
 ): Promise<{ hits: IsinSearchHit[]; debug: IsinSearchDebugStep }> {
   const q = query.trim().slice(0, 80)
-  const maxAttempts = options?.maxAttempts ?? 3
-  if (q.length < 2) {
+  try {
+    const rows = await searchMorningstar(q)
+    const hits: IsinSearchHit[] = rows.map((h) => ({
+      isin: h.isin,
+      name: h.name,
+      ticker: h.yahooTicker,
+      exchange: h.mic,
+      investmentType: h.investmentType,
+      source: 'morningstar',
+    }))
+    return {
+      hits,
+      debug: {
+        phase: 'morningstar',
+        query: q,
+        ok: hits.length > 0,
+        detail: hits.length ? `${hits.length} hit(s), 1er=${hits[0].isin}` : '0 résultat',
+        count: hits.length,
+      },
+    }
+  } catch (e) {
     return {
       hits: [],
       debug: {
-        phase: 'morningstar-local',
+        phase: 'morningstar',
         query: q,
         ok: false,
-        detail: 'query trop courte',
+        detail: e instanceof Error ? e.message : String(e),
       },
     }
   }
-  // Morningstar often returns HTTP 202 + empty body (bot challenge). Retry a few times.
-  let lastDetail = ''
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      if (!morningstarWarmed) {
-        await fetch('/api/morningstar-warmup', {
-          signal: AbortSignal.timeout(10000),
-        }).catch(() => undefined)
-        morningstarWarmed = true
-      }
-      const url = `/api/morningstar?q=${encodeURIComponent(q)}`
-      const res = await fetch(url, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(15000),
-      })
-      const text = await res.text()
-      if (!res.ok) {
-        lastDetail = `HTTP ${res.status}`
-        continue
-      }
-      if (!text || !text.trim()) {
-        lastDetail = `HTTP ${res.status} corps vide (challenge bot)`
-        morningstarWarmed = false
-        await new Promise((r) => setTimeout(r, 200 * attempt))
-        continue
-      }
-      let json: {
-        results?: Array<{
-          type?: string
-          score?: number
-          value?: {
-            isin?: string
-            name?: string
-            shortName?: string
-            companyName?: string
-            ticker?: string
-            exchange?: string
-            exchangeCountry?: string
-            investmentType?: string
-          }
-        }>
-      }
-      try {
-        json = JSON.parse(text) as typeof json
-      } catch {
-        lastDetail = `JSON invalide (${text.slice(0, 80)}…)`
-        continue
-      }
-      const hits: IsinSearchHit[] = []
-      for (const item of json.results ?? []) {
-        if (item.type !== 'security' || !item.value?.isin) continue
-        const v = item.value
-        const isin = v.isin!.toUpperCase()
-        if (!isValidIsin(isin)) continue
-        let ticker = (v.ticker || '').replace(/\s+/g, '')
-        if (ticker && !ticker.includes('.')) {
-          if (v.exchange === 'XPAR' || v.exchangeCountry === 'FRA') {
-            ticker = `${ticker}.PA`
-          } else if (v.exchange === 'XMAD' || v.exchangeCountry === 'ESP') {
-            ticker = `${ticker}.MC`
-          }
-        }
-        hits.push({
-          isin,
-          name: v.name || v.shortName || v.companyName,
-          ticker,
-          figiTicker: v.ticker,
-          exchange: v.exchange,
-          exchangeCountry: v.exchangeCountry,
-          investmentType: v.investmentType,
-          score: item.score,
-          source: 'morningstar',
-        })
-      }
-      return {
-        hits,
-        debug: {
-          phase: 'morningstar-local',
-          query: q,
-          ok: hits.length > 0,
-          detail:
-            hits.length > 0
-              ? `${hits.length} hit(s), 1er=${hits[0].isin} (essai ${attempt})`
-              : `réponse OK mais aucun ISIN (essai ${attempt})`,
-          count: hits.length,
-        },
-      }
-    } catch (e) {
-      lastDetail = e instanceof Error ? e.message : String(e)
-    }
-  }
-  return {
-    hits: [],
-    debug: {
-      phase: 'morningstar-local',
-      query: q,
-      ok: false,
-      detail: lastDetail || 'échec',
-    },
-  }
 }
+
 
 /**
  * Search ISIN candidates — Fortuneo Accès Marchés first, then Morningstar / GAS.
@@ -402,8 +288,6 @@ export async function searchIsinCandidates(input: {
   name: string
   yahooTicker?: string
   onStatus?: (msg: string) => void
-  /** Skip Vite Morningstar proxy (force GAS only) */
-  skipLocalMorningstar?: boolean
   /**
    * Faster path for bulk import / auto-resolve: fewer queries / shorter
    * timeouts on primary sources. Yahoo→ISIN runs only if no acceptable hit.
@@ -439,7 +323,6 @@ export async function searchIsinCandidates(input: {
   const localQueryCap = batch ? 2 : 3
   const gasQueryCap = batch ? 3 : 4
   const gasTimeoutMs = batch ? 18_000 : 45_000
-  const msAttempts = batch ? 1 : 3
   const yahooCascadeCap = batch ? 3 : 5
 
   const ingest = (
@@ -498,7 +381,7 @@ export async function searchIsinCandidates(input: {
       error:
         candidates.length === 0
           ? errors[0] ||
-            'Aucun ISIN trouvé. En dev, vérifiez le proxy Vite /api/morningstar ; en prod, redéployez le GAS (OpenFIGI+Boursorama).'
+            'Aucun ISIN trouvé (Fortuneo, Morningstar, proxy GAS). Saisissez-le manuellement.'
           : undefined,
     }
   }
@@ -567,28 +450,16 @@ export async function searchIsinCandidates(input: {
     }
   }
 
-  // 1) Morningstar via Vite proxy (browser path — works in npm run dev)
-  if (!input.skipLocalMorningstar && import.meta.env.DEV) {
-    for (const q of queries.slice(0, localQueryCap)) {
-      input.onStatus?.(`Morningstar local « ${q} »…`)
-      await yieldToUi()
-      const { hits, debug: step } = await searchIsinMorningstarLocal(q, {
-        maxAttempts: msAttempts,
-      })
-      debug.push(step)
-      if (hits.length) {
-        ingest(hits, 'morningstar')
-        break
-      }
+  // 1) Morningstar screener (direct, CORS)
+  for (const q of queries.slice(0, localQueryCap)) {
+    input.onStatus?.(`Morningstar « ${q} »…`)
+    await yieldToUi()
+    const { hits, debug: step } = await searchIsinMorningstar(q)
+    debug.push(step)
+    if (hits.length) {
+      ingest(hits, 'morningstar')
+      break
     }
-  } else {
-    debug.push({
-      phase: 'morningstar-local',
-      ok: false,
-      detail: input.skipLocalMorningstar
-        ? 'ignoré (skipLocalMorningstar)'
-        : 'hors mode dev — pas de proxy Vite /api/morningstar',
-    })
   }
 
   // 2) GAS proxy (Morningstar may 403; OpenFIGI+Boursorama fallback)
@@ -706,198 +577,3 @@ export async function searchIsinCandidates(input: {
   return finishReport()
 }
 
-export interface AutoIsinResult {
-  updated: number
-  skipped: number
-  failed: number
-  details: Array<{
-    from: string
-    name: string
-    to?: string
-    status: 'ok' | 'skip' | 'fail'
-    detail: string
-  }>
-}
-
-/** Per-title budget in bulk mode (search + scoring). */
-const BATCH_ITEM_DEADLINE_MS = 35_000
-
-/**
- * Auto-resolve LOCAL:… supports to real ISINs (EUR preferred).
- * Only applies when confidence ≥ AUTO_ISIN_SCORE_MIN; otherwise leaves for edit.
- * Uses a fast batch search path and flushes rekeys in groups so the UI stays responsive.
- */
-export async function autoResolveLocalIsins(
-  supports?: Support[],
-  options?: {
-    force?: boolean
-    onProgress?: (info: {
-      current: number
-      total: number
-      name: string
-      status: string
-    }) => void
-  },
-): Promise<AutoIsinResult> {
-  let list = supports ?? (await listFlatSupports())
-  list = list.filter((s) => isLocalSupportId(s.isin))
-
-  const details: AutoIsinResult['details'] = []
-  let updated = 0
-  let skipped = 0
-  let failed = 0
-  const total = list.length
-
-  type PendingRekey = {
-    from: string
-    to: string
-    name: string
-    yahooTicker?: string
-    googleTicker?: string
-    boursoramaTicker?: string
-    manualPrices: Support['manualPrices']
-    staticPrice?: number
-  }
-  const pending: PendingRekey[] = []
-
-  const flushPending = async () => {
-    if (!pending.length) return
-    const batch = pending.splice(0, pending.length)
-    await updatePortfolio((p) => {
-      for (const item of batch) {
-        const source = p.findSupportByKey(item.from)
-        if (!source) continue
-        const isLocal = item.to.startsWith('LOCAL:')
-        let target = p.findSupportByKey(item.to)
-        if (!target) {
-          target = p.upsertSupport({
-            niceUniqueName: item.name || source.niceUniqueName,
-            ISIN: isLocal ? '' : item.to,
-            localKey: isLocal ? item.to : '',
-            assetType: AssetType.ACTIONS,
-            getterType: item.yahooTicker
-              ? GetterType.YAHOO_FINANCE
-              : source.getterType,
-            yahooFinanceTicker:
-              item.yahooTicker ?? source.yahooFinanceTicker,
-            googleFinanceTicker:
-              item.googleTicker ?? source.googleFinanceTicker,
-            boursoramaTicker:
-              item.boursoramaTicker ?? source.boursoramaTicker,
-            staticDatedValues: source.staticDatedValues,
-            lastKnownValue: source.lastKnownValue,
-          })
-        } else {
-          if (item.yahooTicker) target.yahooFinanceTicker = item.yahooTicker
-          if (item.googleTicker) target.googleFinanceTicker = item.googleTicker
-          if (!target.niceUniqueName) target.niceUniqueName = item.name
-        }
-        for (const env of p.envelopes) {
-          for (const op of env.operations) {
-            if (op.supportUniqueID === source.uniqueID) {
-              op.supportUniqueID = target.uniqueID
-              op.customDetails = {
-                ...op.customDetails,
-                isin: item.to,
-                name: target.niceUniqueName,
-              }
-            }
-          }
-        }
-        if (source.uniqueID !== target.uniqueID) {
-          delete p.supports[source.uniqueID]
-        }
-      }
-    })
-  }
-
-  for (let i = 0; i < list.length; i++) {
-    const s = list[i]
-    options?.onProgress?.({
-      current: i + 1,
-      total,
-      name: s.name,
-      status: `ISIN… (${i + 1}/${total})`,
-    })
-    await yieldToUi()
-    try {
-      const report = await withDeadline(
-        BATCH_ITEM_DEADLINE_MS,
-        s.name,
-        () =>
-          searchIsinCandidates({
-            name: s.name,
-            yahooTicker: s.yahooTicker,
-            batch: true,
-            onStatus: (msg) =>
-              options?.onProgress?.({
-                current: i + 1,
-                total,
-                name: s.name,
-                status: msg,
-              }),
-          }),
-      )
-      const best = report.suggested
-      if (!best) {
-        failed++
-        details.push({
-          from: s.isin,
-          name: s.name,
-          status: 'fail',
-          detail: report.error || 'aucun candidat',
-        })
-      } else if (best.score < AUTO_ISIN_SCORE_MIN) {
-        skipped++
-        details.push({
-          from: s.isin,
-          name: s.name,
-          to: best.isin,
-          status: 'skip',
-          detail: `score ${best.score} < ${AUTO_ISIN_SCORE_MIN} — choisir à l’édition`,
-        })
-      } else {
-        const g = best.ticker
-          ? googleTickerFromYahoo(best.ticker)
-          : undefined
-        pending.push({
-          from: s.isin,
-          to: best.isin,
-          name: s.name,
-          yahooTicker: best.ticker || s.yahooTicker,
-          googleTicker: g ?? s.googleTicker,
-          boursoramaTicker: s.boursoramaTicker,
-          manualPrices: s.manualPrices,
-          staticPrice: s.staticPrice,
-        })
-        updated++
-        details.push({
-          from: s.isin,
-          name: s.name,
-          to: best.isin,
-          status: 'ok',
-          detail: `${best.isin}${best.eurListed ? ' (EUR)' : ''} score=${best.score}`,
-        })
-      }
-    } catch (e) {
-      failed++
-      details.push({
-        from: s.isin,
-        name: s.name,
-        status: 'fail',
-        detail: e instanceof Error ? e.message : String(e),
-      })
-    }
-
-    // Flush every few hits so a crash mid-run keeps partial progress
-    if (pending.length >= 5) {
-      await flushPending()
-      await yieldToUi()
-    } else if (i < list.length - 1) {
-      await new Promise((r) => setTimeout(r, 80))
-    }
-  }
-
-  await flushPending()
-  return { updated, skipped, failed, details }
-}

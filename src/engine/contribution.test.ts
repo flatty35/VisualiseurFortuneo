@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Operation, Support, VirtualOpening } from '@/domain/types'
-import { computePositionContributions } from './contribution'
+import { computeEnvelopeCapital, computePositionContributions } from './contribution'
 
 const support: Support = {
   isin: 'FR0000120073',
@@ -176,5 +176,80 @@ describe('computePositionContributions', () => {
     expect(rows[0].proceeds).toBeCloseTo(550)
     expect(rows[0].absolute).toBeCloseTo(50)
     expect(rows[0].status).toBe('closed')
+  })
+
+  it('counts TTF in the line cost', () => {
+    const rows = computePositionContributions({
+      operations: [
+        op({ id: 'b1', type: 'ACHAT', date: '2024-01-02', isin: support.isin, quantity: 10, price: 100, netAmount: -1000 }),
+        op({ id: 't1', type: 'TAXE', date: '2024-01-02', isin: support.isin, quantity: 10, netAmount: -3 }),
+      ],
+      supports: [support],
+      quotes: new Map(),
+      virtualOpenings: [],
+      asOf: '2025-01-02',
+      envelopes: ['PEA'],
+    })
+    expect(rows[0].invested).toBeCloseTo(1003)
+  })
+})
+
+describe('computeEnvelopeCapital', () => {
+  const other: Support = { ...support, isin: 'FR0000125486', name: 'Vinci' }
+  const run = (operations: Operation[], virtualOpenings: VirtualOpening[] = []) =>
+    computeEnvelopeCapital({
+      operations,
+      supports: [support, other],
+      quotes: new Map(),
+      virtualOpenings,
+      asOf: '2025-01-02',
+      envelopes: ['PEA'],
+    })[0]
+
+  it('sale proceeds finance the next buy (no double counting)', () => {
+    const c = run([
+      op({ id: 'b1', type: 'ACHAT', date: '2024-01-02', isin: support.isin, quantity: 10, netAmount: -1000 }),
+      op({ id: 's1', type: 'VENTE', date: '2024-03-01', isin: support.isin, quantity: 10, netAmount: 1200 }),
+      op({ id: 'b2', type: 'ACHAT', date: '2024-04-02', isin: other.isin, quantity: 10, netAmount: -1500 }),
+    ])
+    expect(c.grossBuys).toBeCloseTo(2500)
+    expect(c.reinvested).toBeCloseTo(1200)
+    expect(c.invested).toBeCloseTo(1300) // 1000 + (1500 − 1200)
+    expect(c.cash).toBeCloseTo(0)
+  })
+
+  it('cash never goes negative and a later sale does not finance an earlier buy', () => {
+    const c = run([
+      op({ id: 'b1', type: 'ACHAT', date: '2024-01-02', isin: support.isin, quantity: 10, netAmount: -1000 }),
+      op({ id: 'b2', type: 'ACHAT', date: '2024-02-01', isin: other.isin, quantity: 5, netAmount: -500 }),
+      op({ id: 's1', type: 'VENTE', date: '2024-06-03', isin: support.isin, quantity: 10, netAmount: 1100 }),
+    ])
+    expect(c.invested).toBeCloseTo(1500)
+    expect(c.cash).toBeCloseTo(1100)
+  })
+
+  it('same-day sell then buy, dividends and TTF go through the pocket', () => {
+    const c = run(
+      [
+        op({ id: 'seed', type: 'POSITION_SEED', date: '2024-01-02', isin: support.isin, quantity: 5, synthetic: true }),
+        op({ id: 'd1', type: 'DIVIDENDE', date: '2024-05-02', isin: support.isin, netAmount: 20 }),
+        op({ id: 'b2', type: 'ACHAT', date: '2024-07-01', isin: other.isin, quantity: 5, netAmount: -600 }),
+        op({ id: 't2', type: 'TAXE', date: '2024-07-01', isin: other.isin, netAmount: -2 }),
+        op({ id: 's1', type: 'VENTE', date: '2024-07-01', isin: support.isin, quantity: 5, netAmount: 550 }),
+      ],
+      [
+        {
+          envelope: 'PEA',
+          date: '2024-01-02',
+          cash: 0,
+          positions: [{ isin: support.isin, name: support.name, quantity: 5 }],
+          computedAt: '2024-01-02T00:00:00Z',
+        },
+      ],
+    )
+    // seed 500 + (602 − 20 − 550) = 532
+    expect(c.invested).toBeCloseTo(532)
+    expect(c.reinvested).toBeCloseTo(570)
+    expect(c.cash).toBeCloseTo(0)
   })
 })

@@ -467,7 +467,11 @@ export class Portfolio {
     )
   }
 
-  upsertSupport(partial: SupportData & { niceUniqueName: string }): Support {
+  upsertSupport(input: SupportData & { niceUniqueName: string }): Support {
+    // Object.assign would otherwise wipe stored fields with `undefined`
+    const partial = Object.fromEntries(
+      Object.entries(input).filter(([, v]) => v !== undefined),
+    ) as SupportData & { niceUniqueName: string }
     if (partial.ISIN) {
       const byIsin = this.findSupportByIsin(partial.ISIN)
       if (byIsin) {

@@ -152,60 +152,73 @@ export async function clearEnvelopeOperations(
   return { removed }
 }
 
+function applyFlatSupport(p: Portfolio, flat: Support): void {
+  const existing =
+    (flat.uniqueID ? p.getSupport(flat.uniqueID) : undefined) ??
+    p.findSupportByKey(flat.isin)
+  const isLocal = flat.isin.startsWith('LOCAL:')
+  const manualAsStatic: Array<[number, number]> = (flat.manualPrices ?? []).map(
+    (mp) => [Date.parse(`${mp.date}T12:00:00Z`) || 0, mp.price],
+  )
+  if (flat.staticPrice !== undefined) {
+    manualAsStatic.push([0, flat.staticPrice])
+  }
+  let getterType: number = GetterType.END
+  if (flat.yahooTicker) getterType = GetterType.YAHOO_FINANCE
+  else if (flat.staticPrice !== undefined || flat.manualPrices?.length)
+    getterType = GetterType.STATIC
+  else if (flat.boursoramaTicker) getterType = GetterType.BOURSORAMA
+
+  if (existing) {
+    existing.niceUniqueName = flat.name || existing.niceUniqueName
+    existing.searchName = flat.name || existing.searchName
+    existing.yahooFinanceTicker = flat.yahooTicker ?? ''
+    existing.googleFinanceTicker = flat.googleTicker ?? ''
+    existing.boursoramaTicker = flat.boursoramaTicker ?? ''
+    existing.getterType = getterType
+    existing.staticDatedValues = manualAsStatic
+    if (flat.staticPrice !== undefined) {
+      existing.lastKnownValue = [0, flat.staticPrice]
+    }
+    if (isLocal) {
+      existing.localKey = flat.isin
+      existing.ISIN = ''
+    } else if (!flat.isin.startsWith('ID:')) {
+      existing.ISIN = flat.isin.toUpperCase()
+      existing.localKey = ''
+    }
+  } else {
+    p.upsertSupport({
+      niceUniqueName: flat.name,
+      ISIN: isLocal ? '' : flat.isin,
+      localKey: isLocal ? flat.isin : '',
+      assetType: AssetType.ACTIONS,
+      getterType,
+      yahooFinanceTicker: flat.yahooTicker ?? '',
+      googleFinanceTicker: flat.googleTicker ?? '',
+      boursoramaTicker: flat.boursoramaTicker ?? '',
+      staticDatedValues: manualAsStatic,
+      lastKnownValue:
+        flat.staticPrice !== undefined
+          ? ([0, flat.staticPrice] as [number, number])
+          : ([0, 0] as [number, number]),
+    })
+  }
+}
+
 /** Upsert a flat Support DTO into the Portfolio store (ticker / name edits). */
 export async function putFlatSupport(flat: Support): Promise<void> {
-  await updatePortfolio((p) => {
-    const existing =
-      (flat.uniqueID ? p.getSupport(flat.uniqueID) : undefined) ??
-      p.findSupportByKey(flat.isin)
-    const isLocal = flat.isin.startsWith('LOCAL:')
-    const manualAsStatic: Array<[number, number]> = (flat.manualPrices ?? []).map(
-      (mp) => [Date.parse(`${mp.date}T12:00:00Z`) || 0, mp.price],
-    )
-    if (flat.staticPrice !== undefined) {
-      manualAsStatic.push([0, flat.staticPrice])
-    }
-    let getterType: number = GetterType.END
-    if (flat.yahooTicker) getterType = GetterType.YAHOO_FINANCE
-    else if (flat.staticPrice !== undefined || flat.manualPrices?.length)
-      getterType = GetterType.STATIC
-    else if (flat.boursoramaTicker) getterType = GetterType.BOURSORAMA
+  await updatePortfolio((p) => applyFlatSupport(p, flat))
+}
 
-    if (existing) {
-      existing.niceUniqueName = flat.name || existing.niceUniqueName
-      existing.searchName = flat.name || existing.searchName
-      existing.yahooFinanceTicker = flat.yahooTicker ?? ''
-      existing.googleFinanceTicker = flat.googleTicker ?? ''
-      existing.boursoramaTicker = flat.boursoramaTicker ?? ''
-      existing.getterType = getterType
-      existing.staticDatedValues = manualAsStatic
-      if (flat.staticPrice !== undefined) {
-        existing.lastKnownValue = [0, flat.staticPrice]
-      }
-      if (isLocal) {
-        existing.localKey = flat.isin
-        existing.ISIN = ''
-      } else if (!flat.isin.startsWith('ID:')) {
-        existing.ISIN = flat.isin.toUpperCase()
-        existing.localKey = ''
-      }
-    } else {
-      p.upsertSupport({
-        niceUniqueName: flat.name,
-        ISIN: isLocal ? '' : flat.isin,
-        localKey: isLocal ? flat.isin : '',
-        assetType: AssetType.ACTIONS,
-        getterType,
-        yahooFinanceTicker: flat.yahooTicker ?? '',
-        googleFinanceTicker: flat.googleTicker ?? '',
-        boursoramaTicker: flat.boursoramaTicker ?? '',
-        staticDatedValues: manualAsStatic,
-        lastKnownValue:
-          flat.staticPrice !== undefined
-            ? ([0, flat.staticPrice] as [number, number])
-            : ([0, 0] as [number, number]),
-      })
-    }
+/**
+ * Upsert many flat Supports with a single load/save. Every save rewrites all
+ * tables, so loops must use this instead of `putFlatSupport`.
+ */
+export async function putFlatSupports(list: Support[]): Promise<void> {
+  if (!list.length) return
+  await updatePortfolio((p) => {
+    for (const flat of list) applyFlatSupport(p, flat)
   })
 }
 

@@ -5,6 +5,7 @@ import {
   loadProjected,
 } from '@/persist/portfolioStore'
 import {
+  computeEnvelopeCapital,
   computePositionContributions,
   type PositionContribution,
 } from '@/engine/contribution'
@@ -91,6 +92,27 @@ export default function ContributionPage() {
     })
   }, [data])
 
+  const capital = useMemo(() => {
+    if (!data) return null
+    const parts = computeEnvelopeCapital({
+      operations: data.operations,
+      supports: data.supports,
+      quotes: data.quotes,
+      virtualOpenings: data.virtualOpenings,
+      asOf: data.asOf,
+      envelopes: data.envelopes,
+    })
+    return parts.reduce(
+      (acc, p) => ({
+        invested: acc.invested + p.invested,
+        grossBuys: acc.grossBuys + p.grossBuys,
+        reinvested: acc.reinvested + p.reinvested,
+        cash: acc.cash + p.cash,
+      }),
+      { invested: 0, grossBuys: 0, reinvested: 0, cash: 0 },
+    )
+  }, [data])
+
   const filtered = useMemo(() => {
     if (statusFilter === 'all') return rows
     return rows.filter((r) => r.status === statusFilter)
@@ -114,10 +136,9 @@ export default function ContributionPage() {
 
   const kpis = useMemo(() => {
     const absolute = filtered.reduce((s, r) => s + r.absolute, 0)
-    const invested = filtered.reduce((s, r) => s + r.invested, 0)
     const open = filtered.filter((r) => r.status === 'open').length
     const closed = filtered.filter((r) => r.status === 'closed').length
-    return { absolute, invested, open, closed, count: filtered.length }
+    return { absolute, open, closed, count: filtered.length }
   }, [filtered])
 
   const onSort = (key: SortKey) => {
@@ -140,9 +161,12 @@ export default function ContributionPage() {
         <h1 style={{ marginTop: 0 }}>Contribution par position</h1>
         <p className="muted">
           Richesse créée to date par ISIN (ouverts et fermés) : ventes +
-          dividendes + valeur actuelle − achats. ROI = contribution / capital
-          investi ; TRI = XIRR annualisé sur les flux (sensible à la durée
-          d’immobilisation).
+          dividendes + valeur actuelle − achats (TTF incluse). ROI = contribution
+          / montant investi sur la ligne ; TRI = XIRR annualisé sur les flux
+          (sensible à la durée d’immobilisation). Apports nets / réinvesti :
+          poche d’espèces par enveloppe, jamais négative — ventes et dividendes
+          financent les achats suivants (réinvesti), seul le complément est un
+          apport. Total achats = apports nets + réinvesti.
         </p>
 
         <div className="grid-2" style={{ marginTop: '1rem' }}>
@@ -194,12 +218,38 @@ export default function ContributionPage() {
                   {fmtEur(kpis.absolute)}
                 </div>
               </div>
-              <div className="kpi-card">
-                <div className="label">Capital investi</div>
-                <div className="value" style={{ fontSize: '1.4rem' }}>
-                  {fmtEur(kpis.invested)}
-                </div>
-              </div>
+              {capital && (
+                <>
+                  <div className="kpi-card">
+                    <div className="label">Apports nets</div>
+                    <div className="value" style={{ fontSize: '1.4rem' }}>
+                      {fmtEur(capital.invested)}
+                    </div>
+                    <div className="muted" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                      argent frais versé dans l’enveloppe
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="label">Réinvesti</div>
+                    <div className="value" style={{ fontSize: '1.4rem' }}>
+                      {fmtEur(capital.reinvested)}
+                    </div>
+                    <div className="muted" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                      achats financés par ventes / dividendes · total achats{' '}
+                      {fmtEur(capital.grossBuys)}
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="label">Espèces restantes</div>
+                    <div className="value" style={{ fontSize: '1.4rem' }}>
+                      {fmtEur(capital.cash)}
+                    </div>
+                    <div className="muted" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                      ventes / dividendes non réinvestis
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="kpi-card">
                 <div className="label">Positions</div>
                 <div className="value" style={{ fontSize: '1.4rem' }}>

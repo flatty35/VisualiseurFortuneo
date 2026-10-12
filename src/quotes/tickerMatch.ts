@@ -1,5 +1,5 @@
 import type { Support } from '@/domain/types'
-import { listFlatSupports, putFlatSupport } from '@/persist/portfolioStore'
+import { listFlatSupports, putFlatSupports } from '@/persist/portfolioStore'
 import {
   isProxyConfigured,
   mapIsinOpenFigi,
@@ -14,11 +14,13 @@ import {
   searchFortuneoFirstHit,
 } from './fortuneoSearch'
 import {
+  cleanLabelForSearch,
   isQualifiedYahooTicker,
   nameMatchBonus,
   NAME_STOP_WORDS,
   usListingPenalty,
 } from './nameMatch'
+import { mapPool } from './mapPool'
 import { lookupSeedTicker, normalizeMatchKey } from './tickerSeed'
 
 export interface MatchResult {
@@ -55,8 +57,9 @@ export function buildSearchQueries(name: string, isin?: string): string[] {
   // 1) Real ISIN first — unambiguous public key (skip LOCAL:… synthetic keys)
   if (isin && /^[A-Z]{2}[A-Z0-9]{10}$/i.test(isin)) push(isin.toUpperCase())
 
-  // 2) Full name, then cleaned legal suffixes
+  // 2) Full name, then without ETF wrapper words / legal suffixes
   push(raw)
+  push(cleanLabelForSearch(name))
   push(raw.replace(/\b(SA|SE|SAS|NV|PLC|AG|LTD|INC)\b\.?/gi, '').replace(/\s+/g, ' ').trim())
 
   // 3) Significant tokens (DASSAULT from DASSAULT AVIATION)
@@ -123,11 +126,6 @@ export function pickBestTicker(hits: YahooSearchHit[], name: string): string | u
     return pa?.h.symbol ?? best.h.symbol
   }
   return best.h.symbol
-}
-
-/** @deprecated use pickBestTicker */
-export function preferPaTicker(quotes: YahooSearchHit[]): string | undefined {
-  return pickBestTicker(quotes, '')
 }
 
 function isRealIsin(isin?: string): isin is string {
@@ -421,7 +419,6 @@ export async function searchTickerCandidates(input: {
     } catch {
       // continue other queries
     }
-    await sleep(80)
   }
 
   if (isin) {
@@ -460,20 +457,19 @@ export async function searchTickerCandidates(input: {
 /** Instant local seed match only (no network) — safe during import. */
 export async function applySeedMatches(supports?: Support[]): Promise<number> {
   const list = supports ?? (await listFlatSupports())
-  let updated = 0
+  const updates: Support[] = []
   for (const s of list) {
     if (s.yahooTicker) continue
     const seeded = lookupSeedTicker(s.name)
     if (!seeded) continue
-    const g = googleTickerFromYahoo(seeded)
-    await putFlatSupport({
+    updates.push({
       ...s,
       yahooTicker: seeded,
-      googleTicker: s.googleTicker ?? g,
+      googleTicker: s.googleTicker ?? googleTickerFromYahoo(seeded),
     })
-    updated++
   }
-  return updated
+  await putFlatSupports(updates)
+  return updates.length
 }
 
 export interface AutoMatchOptions {
@@ -507,6 +503,7 @@ export async function autoMatchSupports(
   let updated = 0
   let failed = 0
   const total = list.length
+  const writes: Support[] = []
 
   const applyTicker = async (
     s: Support,
@@ -515,7 +512,7 @@ export async function autoMatchSupports(
     results.push(r)
     if (r.ticker && (force || r.source !== 'existing')) {
       const g = googleTickerFromYahoo(r.ticker)
-      await putFlatSupport({
+      writes.push({
         ...s,
         yahooTicker: r.ticker,
         googleTicker: force ? g : (s.googleTicker ?? g),
@@ -523,7 +520,7 @@ export async function autoMatchSupports(
       updated++
     } else if (!r.ticker) {
       if (force) {
-        await putFlatSupport({
+        writes.push({
           ...s,
           yahooTicker: undefined,
           googleTicker: undefined,
@@ -531,6 +528,9 @@ export async function autoMatchSupports(
       }
       failed++
     }
+  }
+  const flushWrites = async () => {
+    await putFlatSupports(writes.splice(0, writes.length))
   }
 
   // --- Pass 0: local seed (instant) ---
@@ -564,6 +564,7 @@ export async function autoMatchSupports(
     }
     pending.push(s)
   }
+  await flushWrites()
 
   // --- Pass 1: OpenFIGI batch Euronext Paris / Amsterdam ---
   const withIsin = pending.filter((s) => isRealIsin(s.isin))
@@ -598,49 +599,40 @@ export async function autoMatchSupports(
       stillPending.push(s)
     }
   }
+  await flushWrites()
 
   // --- Pass 2: cascade (Fortuneo → Yahoo → OpenFIGI any) for misses ---
-  for (let i = 0; i < stillPending.length; i++) {
-    const s = stillPending[i]
-    const done = results.length + i + 1
-    onProgress?.({
-      current: Math.min(done, total),
-      total,
-      name: s.name,
-      status: `Cascade ticker… (${Math.min(done, total)}/${total})`,
-    })
-
+  await mapPool(stillPending, 4, async (s) => {
     const r = await resolveTickerForSupport(s, {
       force,
       // Batch already covered PA/AM; skip duplicate OpenFIGI euronext call
       skipOpenFigiEuronext: isRealIsin(s.isin),
     })
     await applyTicker(s, r)
-
-    if (i < stillPending.length - 1) {
-      await sleep(120)
-    }
-  }
+    onProgress?.({
+      current: results.length,
+      total,
+      name: s.name,
+      status: `Cascade ticker… (${results.length}/${total})`,
+    })
+    // Keep partial progress if the slow cascade is interrupted
+    if (writes.length >= 5) await flushWrites()
+  })
+  await flushWrites()
 
   return { updated, failed, results }
 }
 
 /** Clear Yahoo/Google tickers for the given supports. */
 export async function resetSupportTickers(supports: Support[]): Promise<number> {
-  let n = 0
-  for (const s of supports) {
-    await putFlatSupport({
+  await putFlatSupports(
+    supports.map((s) => ({
       ...s,
       yahooTicker: undefined,
       googleTicker: undefined,
-    })
-    n++
-  }
-  return n
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
+    })),
+  )
+  return supports.length
 }
 
 export function googleTickerFromYahoo(yahoo: string): string | undefined {

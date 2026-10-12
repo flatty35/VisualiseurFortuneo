@@ -4,7 +4,7 @@ import { parseTitresCsv } from '@/import/fortuneoTitres'
 import { parsePositionsFile } from '@/import/positionsXls'
 import { mergeImport } from '@/import/merge'
 import { isLocalSupportId } from '@/import/resolveIsin'
-import { autoResolveLocalIsins } from '@/quotes/isinSearch'
+import { autoResolveSupports } from '@/quotes/identityResolver'
 import { autoMatchSupports } from '@/quotes/tickerMatch'
 import { isProxyConfigured } from '@/quotes/gasClient'
 import {
@@ -91,62 +91,55 @@ export default function ImportPage() {
         currentCash,
       })
 
-      setProgressPct(50)
-      setProgress('Résolution des ISIN locaux (titres sortis, préférence EUR)…')
       // Scope to this envelope only — avoid re-resolving PEA when importing PEA-PME
-      const envProjected = await loadEnvelopeProjected(envelope)
-      const envIsins = new Set(
-        envProjected.operations
-          .map((o) => o.isin)
-          .filter((x): x is string => Boolean(x)),
-      )
-      const envLocals = (await listFlatSupports()).filter(
-        (s) => isLocalSupportId(s.isin) && envIsins.has(s.isin),
-      )
-      if (isProxyConfigured() || import.meta.env.DEV) {
-        const isinR = await autoResolveLocalIsins(envLocals, {
-          onProgress: (info) => {
-            setProgress(
-              `ISIN ${info.current}/${info.total} — ${info.name}${
-                info.status && !info.status.startsWith('ISIN')
-                  ? ` · ${info.status}`
-                  : ''
-              }`,
-            )
-            setProgressPct(
-              50 + Math.round((info.current / Math.max(info.total, 1)) * 15),
-            )
-          },
-        })
+      const envSupports = async () => {
+        const envIsins = new Set(
+          (await loadEnvelopeProjected(envelope)).operations
+            .map((o) => o.isin)
+            .filter((x): x is string => Boolean(x)),
+        )
+        return (await listFlatSupports()).filter((s) => envIsins.has(s.isin))
+      }
+
+      setProgressPct(50)
+      setProgress('Résolution ISIN + tickers (Fortuneo, Morningstar)…')
+      const fast = await autoResolveSupports(await envSupports(), {
+        onProgress: (info) => {
+          setProgress(`ISIN / ticker ${info.done}/${info.total} — ${info.name}`)
+          setProgressPct(50 + Math.round((info.done / Math.max(info.total, 1)) * 30))
+        },
+      })
+      if (fast.total) {
         r.warnings.push(
-          `ISIN : ${isinR.updated} résolus, ${isinR.skipped} à valider, ${isinR.failed} non trouvés.`,
+          `Résolution rapide : ${fast.isinResolved} ISIN trouvés, ${fast.tickersSet} tickers associés sur ${fast.total} titres.`,
         )
       }
 
-      setProgressPct(65)
-      setProgress('Association des tickers Yahoo (peut prendre 1–2 min)…')
-
-      const envIsinsAfter = new Set(
-        (await loadEnvelopeProjected(envelope)).operations
-          .map((o) => o.isin)
-          .filter((x): x is string => Boolean(x)),
-      )
-      const pending = (await listFlatSupports()).filter(
-        (s) => !s.yahooTicker && envIsinsAfter.has(s.isin),
-      )
-      if (pending.length === 0) {
-        r.warnings.push('Tous les supports ont déjà un ticker.')
-      } else if (!isProxyConfigured()) {
-        r.warnings.push(
-          `${pending.length} support(s) sans ticker — configurez VITE_PROXY_URL puis utilisez Correspondances → Auto-associer.`,
-        )
-      } else {
+      // Slow GAS cascade only for real ISINs still lacking a ticker
+      const after = await envSupports()
+      const pending = after.filter((s) => !s.yahooTicker && !isLocalSupportId(s.isin))
+      const locals = after.filter((s) => isLocalSupportId(s.isin))
+      if (pending.length && isProxyConfigured()) {
+        setProgressPct(80)
+        setProgress('Tickers restants via le proxy…')
         const match = await autoMatchSupports(pending, (info) => {
           setProgress(`${info.status} — ${info.name}`)
-          setProgressPct(65 + Math.round((info.current / Math.max(info.total, 1)) * 30))
+          setProgressPct(80 + Math.round((info.current / Math.max(info.total, 1)) * 15))
         })
         r.warnings.push(
-          `Tickers Yahoo : ${match.updated} associés, ${match.failed} non trouvés.`,
+          `Proxy : ${match.updated} tickers associés, ${match.failed} non trouvés.`,
+        )
+      } else if (pending.length) {
+        r.warnings.push(
+          `${pending.length} support(s) sans ticker — à compléter dans Correspondances.`,
+        )
+      }
+      if (locals.length) {
+        r.warnings.push(
+          `${locals.length} titre(s) sans ISIN fiable (${locals
+            .slice(0, 5)
+            .map((s) => s.name)
+            .join(', ')}${locals.length > 5 ? '…' : ''}) — à valider dans Correspondances.`,
         )
       }
 

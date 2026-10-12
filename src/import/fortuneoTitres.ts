@@ -92,6 +92,8 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
     )
     const net = parseFrenchNumber(pick(row, 'Montant net', 'Montant Net'))
     const currency = pick(row, 'Devise') || 'EUR'
+    const placeRaw = pick(row, 'Place').trim()
+    const place = placeRaw && placeRaw.toLowerCase() !== 'null' ? placeRaw : undefined
 
     const isin = extractIsin(label) ?? extractIsin(operation)
     const name = stripIsinFromName(label || operation)
@@ -133,6 +135,7 @@ export function parseTitresText(text: string, envelope: EnvelopeType): Operation
       fees,
       netAmount: net,
       currency,
+      place,
       label: storedLabel,
     })
   }

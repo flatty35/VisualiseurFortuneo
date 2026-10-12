@@ -151,6 +151,76 @@ export function nameMatchBonus(query: string, hitLabel: string): number {
   return bonus
 }
 
+/** Wrapper words Fortuneo appends to ETF / fund libellés; search APIs miss on them. */
+const SEARCH_NOISE_TOKENS = new Set([
+  'ucits',
+  'etf',
+  'acc',
+  'dis',
+  'cap',
+  'eur',
+  'usd',
+])
+
+/**
+ * Search-friendly libellé: « AMUNDI PEA MONDE (MSCI World) UCITS ETF - Acc EUR ACC »
+ * → « AMUNDI PEA MONDE ». Drops parentheses, the « - … » share-class tail,
+ * wrapper words and a trailing share-class letter. Scoring must still use the
+ * original libellé (share class decides between A / C / I parts).
+ */
+export function cleanLabelForSearch(name: string): string {
+  const base = name
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\b[A-Z]{2}[A-Z0-9]{10}\b/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\s-\s.*$/, ' ')
+  const tokens = base
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !SEARCH_NOISE_TOKENS.has(t.toLowerCase()))
+  while (tokens.length > 1 && /^[A-Za-z]$/.test(tokens[tokens.length - 1])) {
+    tokens.pop()
+  }
+  return tokens.join(' ').trim()
+}
+
+function classTokens(name: string): string[] {
+  return name
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+}
+
+/**
+ * Two libellés name different share classes of one fund: a different
+ * trailing class letter (« Small I » vs « Small A ») or hedged vs not
+ * (« EUR ACC H »). ACC/DIS is not compared — Morningstar names disagree.
+ */
+export function shareClassConflict(a: string, b: string): boolean {
+  const ta = classTokens(a)
+  const tb = classTokens(b)
+  const hedged = (t: string[]) => t.includes('hedged') || t.at(-1) === 'h'
+  if (hedged(ta) !== hedged(tb)) return true
+  const letter = (t: string[]) => {
+    const rest = t.at(-1) === 'h' ? t.slice(0, -1) : t
+    const last = rest.at(-1)
+    return rest.length > 1 && last && /^[a-z]$/.test(last) ? last : undefined
+  }
+  const la = letter(ta)
+  const lb = letter(tb)
+  return Boolean(la && lb && la !== lb)
+}
+
+/** Same libellé once accents / case / spacing are ignored. */
+export function sameLibelle(a: string, b: string): boolean {
+  const k = (s: string) => classTokens(s).join(' ')
+  return Boolean(k(a)) && k(a) === k(b)
+}
+
 /** Yahoo symbol has an exchange suffix, or is an explicit US primary listing. */
 export function isQualifiedYahooTicker(
   ticker: string,

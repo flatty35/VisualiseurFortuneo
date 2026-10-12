@@ -53,10 +53,7 @@ export function buildHoldingsSeries(input: {
     byDate.set(day, list)
   }
 
-  const days = eachBusinessDay(startDate, endDate)
-  const series: HoldingsSnapshot[] = []
-
-  for (const date of days) {
+  const applyDay = (date: string) => {
     const dayOps = (byDate.get(date) ?? []).slice().sort((a, b) => {
       // Versements before buys so EOD cash is correct; chart spikes handled separately
       const rank = (o: Operation) =>
@@ -82,6 +79,18 @@ export function buildHoldingsSeries(input: {
         qty.set(op.isin, (qty.get(op.isin) ?? 0) + delta)
       }
     }
+  }
+
+  // A window starting after the opening must still carry earlier trades
+  for (const date of [...byDate.keys()].filter((d) => d < startDate).sort()) {
+    applyDay(date)
+  }
+
+  const days = eachBusinessDay(startDate, endDate)
+  const series: HoldingsSnapshot[] = []
+
+  for (const date of days) {
+    applyDay(date)
     series.push({
       date,
       quantities: new Map(qty),

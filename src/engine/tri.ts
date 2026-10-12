@@ -25,40 +25,69 @@ export interface CalendarYearTri {
   endValue: number
 }
 
+/** Rate bracket scanned when Newton fails (−99.99 % … +10 000 %/an). */
+const IRR_BRACKET = [-0.9999, -0.99, -0.9, -0.5, -0.2, 0, 0.2, 0.5, 1, 3, 10, 100]
+
 /**
- * IRR / TRI via Newton–Raphson on annualized rate.
+ * XIRR (Excel convention: actual/365). Newton–Raphson from `guess`, then
+ * bisection on the first sign change of NPV when Newton diverges.
  * Cash flows: negative = money in, positive = money out.
  */
 export function computeIrr(flows: CashFlow[], guess = 0.05): number | null {
-  if (flows.length < 2) return null
-  const sorted = [...flows].sort((a, b) => a.date.localeCompare(b.date))
-  const t0 = new Date(sorted[0].date + 'T00:00:00Z').getTime()
-  const yearMs = 365.25 * 86400000
+  const live = flows.filter((f) => Number.isFinite(f.amount) && f.amount !== 0)
+  if (live.length < 2) return null
+  if (!live.some((f) => f.amount < 0) || !live.some((f) => f.amount > 0)) {
+    return null
+  }
+  const t0 = Math.min(...live.map((f) => Date.parse(`${f.date}T00:00:00Z`)))
+  const pts = live.map((f) => ({
+    years: (Date.parse(`${f.date}T00:00:00Z`) - t0) / (365 * 86400000),
+    amount: f.amount,
+  }))
+  const scale = Math.max(...pts.map((p) => Math.abs(p.amount)))
 
   const npv = (r: number) =>
-    sorted.reduce((acc, f) => {
-      const years = (new Date(f.date + 'T00:00:00Z').getTime() - t0) / yearMs
-      return acc + f.amount / Math.pow(1 + r, years)
-    }, 0)
-
+    pts.reduce((acc, p) => acc + p.amount / Math.pow(1 + r, p.years), 0)
   const dNpv = (r: number) =>
-    sorted.reduce((acc, f) => {
-      const years = (new Date(f.date + 'T00:00:00Z').getTime() - t0) / yearMs
-      if (years === 0) return acc
-      return acc - (years * f.amount) / Math.pow(1 + r, years + 1)
-    }, 0)
+    pts.reduce(
+      (acc, p) => acc - (p.years * p.amount) / Math.pow(1 + r, p.years + 1),
+      0,
+    )
+  const solved = (r: number) =>
+    Number.isFinite(r) && r > -1 && Math.abs(npv(r)) < 1e-7 * scale
 
   let rate = guess
-  for (let i = 0; i < 80; i++) {
-    const y = npv(rate)
+  for (let i = 0; i < 60; i++) {
     const dy = dNpv(rate)
-    if (Math.abs(dy) < 1e-12) break
-    const next = rate - y / dy
-    if (!Number.isFinite(next)) return null
-    if (Math.abs(next - rate) < 1e-10) return next
+    if (!Number.isFinite(dy) || Math.abs(dy) < 1e-12) break
+    const next = rate - npv(rate) / dy
+    if (!Number.isFinite(next) || next <= -1) break
+    if (Math.abs(next - rate) < 1e-10) {
+      rate = next
+      break
+    }
     rate = next
   }
-  return Number.isFinite(rate) ? rate : null
+  if (solved(rate)) return rate
+
+  for (let i = 0; i < IRR_BRACKET.length - 1; i++) {
+    let lo = IRR_BRACKET[i]
+    let hi = IRR_BRACKET[i + 1]
+    let fLo = npv(lo)
+    if (Math.sign(fLo) === Math.sign(npv(hi))) continue
+    for (let k = 0; k < 200 && hi - lo > 1e-12; k++) {
+      const mid = (lo + hi) / 2
+      const fMid = npv(mid)
+      if (Math.sign(fMid) === Math.sign(fLo)) {
+        lo = mid
+        fLo = fMid
+      } else {
+        hi = mid
+      }
+    }
+    return (lo + hi) / 2
+  }
+  return null
 }
 
 function priceAt(
@@ -85,9 +114,12 @@ function normalizeLabel(s: string): string {
 }
 
 /**
- * External capital for envelope TRI (money crossing the PEA/CTO boundary).
+ * External capital for TRI (money crossing the titres boundary).
  * Titres-only: each achat is an apport (cash arrives then is invested);
  * each vente is a retrait (proceeds leave — no cumulative cash pocket).
+ * Encaissements (DIVIDENDE, incl. coupon d'amortissement) leave the titres
+ * too; TTF / frais on a title are extra money in (not inside the buy's
+ * Montant net). DETACHEMENT duplicates the Encaissement and is ignored.
  */
 export function externalCashFlowDirection(
   op: Operation,
@@ -95,7 +127,38 @@ export function externalCashFlowDirection(
   if (op.synthetic || !op.isin) return null
   if (isBuyTrade(op.type)) return 'in'
   if (isSellTrade(op.type)) return 'out'
+  if (op.type === 'DIVIDENDE' || op.type === 'TAXE' || op.type === 'FRAIS') {
+    const net = op.netAmount ?? 0
+    if (net > 1e-9) return 'out'
+    if (net < -1e-9) return 'in'
+  }
   return null
+}
+
+/** TRI flow of one operation (sign convention: in = negative). */
+function operationFlow(
+  op: Operation,
+  fallbackPrice?: (op: Operation) => number | undefined,
+): CashFlow | null {
+  const dir = externalCashFlowDirection(op)
+  if (!dir) return null
+  let abs = Math.abs(tradeCashAmount(op))
+  if (abs < 1e-9 && fallbackPrice && op.quantity) {
+    const px = fallbackPrice(op)
+    if (px !== undefined && Number.isFinite(px) && px > 0) {
+      abs = Math.abs(op.quantity) * px
+    }
+  }
+  if (abs < 1e-9) return null
+  return {
+    date: toBusinessDay(op.date),
+    amount: dir === 'in' ? -abs : abs,
+    label: op.label || (dir === 'in' ? 'Apport' : 'Retrait'),
+  }
+}
+
+function byDateThenLabel(a: CashFlow, b: CashFlow): number {
+  return a.date.localeCompare(b.date) || a.label.localeCompare(b.label)
 }
 
 /**
@@ -170,6 +233,7 @@ export function computePortfolioTri(input: {
     flows.push(
       ...listPositionTradeFlows({
         operations: input.operations,
+        envelope: input.envelope,
         isin: input.isin,
         supports: input.supports,
         quotes: input.quotes,
@@ -242,23 +306,12 @@ export function listEnvelopeExternalFlows(input: {
   const out: CashFlow[] = []
   for (const op of input.operations) {
     if (op.envelope !== input.envelope) continue
-    if (op.synthetic) continue
-    const day = toBusinessDay(op.date)
-    if (day < from || day > to) continue
-    if (!includeStart && day <= from) continue
-    const dir = externalCashFlowDirection(op)
-    if (!dir) continue
-    const abs = Math.abs(tradeCashAmount(op))
-    if (abs < 1e-9) continue
-    out.push({
-      date: day,
-      amount: dir === 'in' ? -abs : abs,
-      label: op.label || (dir === 'in' ? 'Apport' : 'Retrait'),
-    })
+    const flow = operationFlow(op)
+    if (!flow || flow.date < from || flow.date > to) continue
+    if (!includeStart && flow.date <= from) continue
+    out.push(flow)
   }
-  return out.sort(
-    (a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label),
-  )
+  return out.sort(byDateThenLabel)
 }
 
 /**
@@ -275,11 +328,13 @@ export function sumEnvelopeExternalFlows(input: {
 }
 
 /**
- * Mid-period buy/sell flows for one position.
- * Buys = capital in (−), sells = capital out (+). Start day excluded.
+ * Mid-period flows for one position, same definition as the envelope TRI
+ * (Montant net incl. courtage, dividendes, TTF). Start day excluded.
+ * Market price × qty only when the operation carries no amount.
  */
 export function listPositionTradeFlows(input: {
   operations: Operation[]
+  envelope?: EnvelopeType
   isin: string
   supports: Support[]
   quotes: Map<string, QuoteBar[]>
@@ -288,51 +343,17 @@ export function listPositionTradeFlows(input: {
 }): CashFlow[] {
   const from = toBusinessDay(input.from)
   const to = toBusinessDay(input.to)
+  const marketPrice = (op: Operation) =>
+    priceAt(op.date, input.isin, input.supports, input.quotes)
   const out: CashFlow[] = []
   for (const op of input.operations) {
-    if (op.isin !== input.isin || op.synthetic) continue
-    const day = toBusinessDay(op.date)
-    if (day <= from || day > to) continue
-    const qty = op.quantity ?? 0
-    if (Math.abs(qty) < 1e-12) continue
-    const px =
-      op.price ??
-      priceAt(op.date, input.isin, input.supports, input.quotes)
-    if (px === undefined || !Number.isFinite(px) || !(px > 0)) {
-      const cash = tradeCashAmount(op)
-      if (Math.abs(cash) < 1e-9) continue
-      if (op.type === 'ACHAT' || op.type === 'SCRIPT' || op.type === 'AUGMENTATION_CAPITAL') {
-        out.push({
-          date: day,
-          amount: -Math.abs(cash),
-          label: op.label || 'Achat',
-        })
-      } else if (op.type === 'VENTE' || op.type === 'RACHAT') {
-        out.push({
-          date: day,
-          amount: Math.abs(cash),
-          label: op.label || 'Vente',
-        })
-      }
-      continue
-    }
-    if (op.type === 'ACHAT' || op.type === 'SCRIPT' || op.type === 'AUGMENTATION_CAPITAL') {
-      out.push({
-        date: day,
-        amount: -(Math.abs(qty) * px),
-        label: op.label || 'Achat',
-      })
-    } else if (op.type === 'VENTE' || op.type === 'RACHAT') {
-      out.push({
-        date: day,
-        amount: Math.abs(qty) * px,
-        label: op.label || 'Vente',
-      })
-    }
+    if (op.isin !== input.isin) continue
+    if (input.envelope && op.envelope !== input.envelope) continue
+    const flow = operationFlow(op, marketPrice)
+    if (!flow || flow.date <= from || flow.date > to) continue
+    out.push(flow)
   }
-  return out.sort(
-    (a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label),
-  )
+  return out.sort(byDateThenLabel)
 }
 
 /** Last calendar day of YYYY-MM (UTC). */
@@ -595,7 +616,8 @@ export function spansMoreThanOneMonth(
 const ALL_ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO']
 
 /**
- * Consolidated TRI across envelopes (sum of values + merged external flows).
+ * Consolidated TRI across envelopes: every envelope's own synthetic buy /
+ * sell (at its own first / last valued day) plus all mid-period flows.
  */
 export function computeConsolidatedPortfolioTri(input: {
   operations: Operation[]
@@ -626,39 +648,10 @@ export function computeConsolidatedPortfolioTri(input: {
     return { irr: null, flows: [], startValue, endValue }
   }
 
-  const startDate =
-    parts
-      .map((p) => p.flows[0]?.date)
-      .filter((d): d is string => Boolean(d))
-      .sort()[0] ?? input.t0
-  const endDate =
-    parts
-      .map((p) => p.flows[p.flows.length - 1]?.date)
-      .filter((d): d is string => Boolean(d))
-      .sort()
-      .at(-1) ?? input.t1
-
-  const mid: CashFlow[] = []
-  for (const p of parts) {
-    for (const f of p.flows) {
-      if (isExternalTriFlow(f)) mid.push(f)
-    }
-  }
-  mid.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label))
-
-  const flows: CashFlow[] = [
-    {
-      date: startDate,
-      amount: -startValue,
-      label: 'Achat synthétique portefeuille',
-    },
-    ...mid,
-    {
-      date: endDate,
-      amount: endValue,
-      label: 'Revente synthétique portefeuille',
-    },
-  ]
+  const flows = parts
+    .flatMap((p) => p.flows)
+    .filter((f) => Math.abs(f.amount) > 1e-9)
+    .sort(byDateThenLabel)
 
   return {
     irr: computeIrr(flows),

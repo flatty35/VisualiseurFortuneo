@@ -13,8 +13,8 @@ import {
   fetchBulkPrices,
   isProxyConfigured,
 } from '@/quotes/gasClient'
+import { autoResolveSupports } from '@/quotes/identityResolver'
 import {
-  autoResolveLocalIsins,
   searchIsinCandidates,
   type IsinCandidate,
   type IsinSearchDebugStep,
@@ -396,50 +396,26 @@ export default function MappingsPage() {
     setMsg(null)
     setMatchProgress(null)
     try {
-      const isinR = await autoResolveLocalIsins(undefined, {
+      const fast = await autoResolveSupports(undefined, {
         onProgress: (info) =>
-          setMatchProgress(
-            `ISIN ${info.current}/${info.total} — ${info.name}${
-              info.status && !info.status.startsWith('ISIN')
-                ? ` · ${info.status}`
-                : ''
-            }`,
-          ),
+          setMatchProgress(`ISIN / ticker ${info.done}/${info.total} — ${info.name}`),
       })
-      const r = await autoMatchSupports(undefined, {
-        onProgress: (info) => setMatchProgress(`${info.status} — ${info.name}`),
-      })
-      setMsg(
-        `ISIN locaux : ${isinR.updated} résolus, ${isinR.skipped} à valider, ${isinR.failed} échecs · ` +
-          `Tickers : ${r.updated} associés, ${r.failed} non trouvés`,
-      )
-      reload()
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setMatching(false)
-      setMatchProgress(null)
-    }
-  }
-
-  const runAutoIsinLocal = async () => {
-    setMatching(true)
-    setMsg(null)
-    setMatchProgress(null)
-    try {
-      const r = await autoResolveLocalIsins(undefined, {
-        onProgress: (info) =>
-          setMatchProgress(
-            `ISIN ${info.current}/${info.total} — ${info.name}${
-              info.status && !info.status.startsWith('ISIN')
-                ? ` · ${info.status}`
-                : ''
-            }`,
-          ),
-      })
-      setMsg(
-        `ISIN (LOCAL→réel, préférence EUR) : ${r.updated} appliqués · ${r.skipped} à choisir à l’édition · ${r.failed} non trouvés`,
-      )
+      const bits = [
+        `Rapide : ${fast.isinResolved} ISIN, ${fast.tickersSet} tickers (${fast.total} titres)`,
+      ]
+      if (isProxyConfigured()) {
+        const r = await autoMatchSupports(undefined, {
+          onProgress: (info) => setMatchProgress(`Proxy · ${info.status} — ${info.name}`),
+        })
+        if (r.updated + r.failed) {
+          bits.push(`Proxy : ${r.updated} tickers, ${r.failed} non trouvés`)
+        }
+      }
+      const locals = (await loadProjected()).supports.filter((s) =>
+        isLocalSupportId(s.isin),
+      ).length
+      if (locals) bits.push(`${locals} LOCAL à valider à l’édition`)
+      setMsg(bits.join(' · '))
       reload()
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e))
@@ -459,12 +435,26 @@ export default function MappingsPage() {
     setMsg(null)
     setMatchProgress(null)
     try {
-      const r = await autoMatchSupports(list, {
+      const fast = await autoResolveSupports(list, {
         force: true,
-        onProgress: (info) => setMatchProgress(`${info.status} — ${info.name}`),
+        onProgress: (info) =>
+          setMatchProgress(`ISIN / ticker ${info.done}/${info.total} — ${info.name}`),
       })
+      const missed = new Set(fast.unresolved.map((r) => r.key))
+      const rest = isProxyConfigured()
+        ? (await loadProjected()).supports.filter(
+            (s) => missed.has(s.isin) && !isLocalSupportId(s.isin),
+          )
+        : []
+      const r = rest.length
+        ? await autoMatchSupports(rest, {
+            force: true,
+            onProgress: (info) => setMatchProgress(`Proxy · ${info.status} — ${info.name}`),
+          })
+        : { updated: 0, failed: 0 }
       setMsg(
-        `Réassociation : ${r.updated} mis à jour · ${r.failed} non trouvés (${list.length} sélectionné(s))`,
+        `Réassociation (${list.length} sélectionné(s)) : ${fast.isinResolved} ISIN, ${fast.tickersSet} tickers` +
+          (rest.length ? ` · proxy ${r.updated} mis à jour, ${r.failed} non trouvés` : ''),
       )
       reload()
     } catch (e) {
@@ -583,15 +573,6 @@ export default function MappingsPage() {
             onClick={runAutoMatchMissing}
           >
             {matching ? 'Association…' : 'Auto-associer (ISIN + tickers)'}
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={matching}
-            onClick={runAutoIsinLocal}
-            title="Résout les clés LOCAL:… vers un ISIN réel (EUR privilégié)"
-          >
-            Auto-ISIN (titres sortis / LOCAL)
           </button>
           <button
             type="button"
@@ -899,7 +880,6 @@ export default function MappingsPage() {
               <details style={{ marginTop: 8 }}>
                 <summary className="muted" style={{ cursor: 'pointer' }}>
                   Debug recherche ISIN ({isinSearch.debug!.length} étapes)
-                  {import.meta.env.DEV ? ' · Morningstar via /api/morningstar' : ''}
                 </summary>
                 <pre
                   className="muted"

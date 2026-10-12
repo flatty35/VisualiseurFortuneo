@@ -1,5 +1,5 @@
 import type { Support } from '@/domain/types'
-import { AssetType, GetterType } from '@/domain/portfolioModel'
+import { AssetType, GetterType, type Portfolio } from '@/domain/portfolioModel'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import { loadPortfolio, savePortfolio } from './portfolioStore'
 
@@ -33,6 +33,19 @@ export async function rekeySupport(
   toIsin: string,
   patch?: Partial<Omit<Support, 'isin'>>,
 ): Promise<RekeyResult> {
+  const portfolio = await loadPortfolio()
+  const result = rekeyInPortfolio(portfolio, fromIsin, toIsin, patch)
+  await savePortfolio(portfolio)
+  return result
+}
+
+/** In-memory rekey (no load/save) — lets batch callers persist once. */
+export function rekeyInPortfolio(
+  portfolio: Portfolio,
+  fromIsin: string,
+  toIsin: string,
+  patch?: Partial<Omit<Support, 'isin'>>,
+): RekeyResult {
   const from = fromIsin.trim()
   const to = normalizeSupportKey(toIsin)
   if (!from) throw new Error('Clé source vide')
@@ -43,7 +56,6 @@ export async function rekeySupport(
     )
   }
 
-  const portfolio = await loadPortfolio()
   const source = portfolio.findSupportByKey(from)
   if (!source) throw new Error(`Support introuvable: ${from}`)
 
@@ -75,7 +87,6 @@ export async function rekeySupport(
       }
       if (patch.yahooTicker) source.getterType = GetterType.YAHOO_FINANCE
     }
-    await savePortfolio(portfolio)
     return { from, to, opsUpdated: 0, voUpdated: 0, mergedIntoExisting: false }
   }
 
@@ -136,7 +147,6 @@ export async function rekeySupport(
     delete portfolio.supports[source.uniqueID]
   }
 
-  await savePortfolio(portfolio)
   return {
     from,
     to,

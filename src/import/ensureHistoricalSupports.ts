@@ -100,10 +100,13 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     }
   }
 
+  let dirty = false
+
   for (const before of projected.operations) {
     const after = finalById.get(before.id) ?? before
     if (before.isin === after.isin) continue
     opsUpdated++
+    dirty = true
     for (const env of portfolio.envelopes) {
       const dop = env.operations.find((x) => x.id === before.id)
       if (!dop) continue
@@ -127,6 +130,7 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     seen.add(o.isin)
     const cur = supportMap.get(o.isin)
     if (!cur) {
+      dirty = true
       let yahooTicker = ''
       let googleTicker = ''
       let boursoramaTicker = ''
@@ -156,7 +160,10 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
       })
     } else if (o.name && cur.name !== o.name && isLocalSupportId(cur.isin)) {
       const s = portfolio.findSupportByKey(o.isin)
-      if (s) s.niceUniqueName = o.name
+      if (s && s.niceUniqueName !== o.name) {
+        s.niceUniqueName = o.name
+        dirty = true
+      }
     }
   }
 
@@ -164,6 +171,7 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     if (!o.name || o.isin) continue
     const id = localSupportId(o.name)
     if (supportMap.has(id) || portfolio.findSupportByKey(id)) continue
+    dirty = true
     portfolio.upsertSupport({
       niceUniqueName: o.name,
       localKey: id,
@@ -173,6 +181,7 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
 
   for (const [from, to] of remap) {
     if (from === to) continue
+    dirty = true
     const old = portfolio.findSupportByKey(from)
     const neu = portfolio.findSupportByKey(to)
     if (old && neu) {
@@ -216,7 +225,7 @@ async function ensureHistoricalSupportsInner(): Promise<HistoricalSupportsReport
     Object.keys(portfolio.supports).length - beforeCount,
   )
 
-  await savePortfolio(portfolio)
+  if (dirty) await savePortfolio(portfolio)
   await applySeedMatches(projectPortfolio(portfolio).supports)
 
   return { opsUpdated, supportsCreated, migratedToRealIsin }

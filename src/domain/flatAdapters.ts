@@ -71,6 +71,7 @@ export function flatOpToDomain(
       name: op.name,
       grossAmount: op.grossAmount,
       isin: op.isin,
+      ...(op.place ? { place: op.place } : {}),
     },
   })
 }
@@ -115,6 +116,10 @@ export function domainOpToFlat(
         ? op.amount
         : undefined,
     currency: op.currency,
+    place:
+      typeof op.customDetails.place === 'string'
+        ? op.customDetails.place
+        : undefined,
     label: op.label,
     synthetic: op.synthetic || undefined,
   }

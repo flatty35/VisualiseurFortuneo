@@ -1,10 +1,19 @@
 import type { QuoteBar, QuoteSeries, Support } from '@/domain/types'
+import { quoteKeyForSupport } from '@/engine/valuation'
 import { db } from '@/persist/db'
+import { isValidIsin } from '@/persist/rekeySupport'
+import { mapPool } from './mapPool'
 import {
   fetchHistoryBulk,
   fetchHistoryRange,
   isProxyConfigured,
 } from './gasClient'
+import {
+  fetchMorningstarCloses,
+  pickHistoryListing,
+  searchMorningstarByIsins,
+  type MorningstarHit,
+} from './morningstarScreener'
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
@@ -19,7 +28,10 @@ function mergeBars(existing: QuoteBar[], incoming: QuoteBar[]): QuoteBar[] {
     .sort((a, b) => a.date.localeCompare(b.date))
 }
 
-/** Prefer a dense Yahoo series over a short poisoned cache. */
+/**
+ * A dense series replaces the cache wholesale — never splice two sources
+ * (Morningstar EUR vs Yahoo native currency) into one line.
+ */
 function preferIncomingHistory(
   existing: QuoteBar[] | undefined,
   incoming: QuoteBar[],
@@ -43,38 +55,73 @@ export type QuoteRefreshProgress = (info: {
   ticker: string
 }) => void
 
-type RefreshPlan = {
-  ticker: string
-  period1: string
-  cached?: QuoteSeries
+/** Last weekday strictly before `date` (most recent session already closed). */
+export function previousWeekday(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`)
+  do {
+    d.setUTCDate(d.getUTCDate() - 1)
+  } while (d.getUTCDay() === 0 || d.getUTCDay() === 6)
+  return d.toISOString().slice(0, 10)
 }
 
+const FRESH_FOR_MS = 6 * 3600_000
+
 /**
- * Usable 2Y history: enough bars spanning the window.
- * Rejects poisoned short series (GAS ychart cache bug reused 5-day deltas).
+ * True when the cached series covers `start` and is recent enough: either
+ * fetched in the last 6 h, or its last bar is the previous session (weekends,
+ * holidays and Morningstar's one-day lag no longer force a refetch).
+ * Rejects short poisoned series (old GAS ychart cache bug).
  */
-function historyLooksUsable(
+export function historyIsFresh(
   cached: QuoteSeries | undefined,
   start: string,
   end: string,
+  now = Date.now(),
 ): boolean {
   const bars = cached?.bars
   if (!bars || bars.length < 40) return false
   const first = bars[0].date
   const last = bars[bars.length - 1].date
-  if (last < end) return false
-  if (first > start) return false
-  const spanMs =
-    Date.parse(`${last}T12:00:00Z`) - Date.parse(`${first}T12:00:00Z`)
-  // At least ~6 months of calendar span for a 2Y request
-  if (!Number.isFinite(spanMs) || spanMs < 180 * 86_400_000) return false
-  return true
+  // Allow a few days of slack: the first session can follow `start`
+  if (first > shiftDays(start, 7)) return false
+  if (last >= previousWeekday(end)) return true
+  const age = now - Date.parse(cached.updatedAt)
+  return Number.isFinite(age) && age >= 0 && age < FRESH_FOR_MS
+}
+
+function shiftDays(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + days)
+  return d.toISOString().slice(0, 10)
+}
+
+interface RefreshPlan {
+  key: string
+  isin?: string
+  yahooTicker?: string
+  cached?: QuoteSeries
+}
+
+/** Morningstar series of the best listing (null = not covered). */
+async function morningstarHistory(
+  plan: RefreshPlan,
+  listings: MorningstarHit[],
+  start: string,
+): Promise<QuoteBar[] | null> {
+  if (!plan.isin) return null
+  const listing = pickHistoryListing(listings, plan.isin, plan.yahooTicker)
+  if (!listing?.secId) return null
+  const bars = await fetchMorningstarCloses(listing.secId, { start })
+  return bars.length ? bars : null
 }
 
 /**
- * Refresh Yahoo history for mapped supports.
- * Prefers one GAS `historybulk` (parallel Yahoo + Boursorama fallback) when
- * tickers share the same window; otherwise concurrent per-ticker fetches.
+ * Refresh daily history for the given supports.
+ *
+ * 1. Morningstar (direct browser call, CORS) for every support with a real
+ *    ISIN — no proxy needed, ~200 ms per title, closes in EUR.
+ * 2. GAS proxy (Yahoo, Boursorama fallback) for LOCAL:… keys and the titles
+ *    Morningstar does not cover — one bulk round-trip, singles for the gaps.
  */
 export async function refreshQuotesForSupports(
   supports: Support[],
@@ -85,201 +132,144 @@ export async function refreshQuotesForSupports(
   const errors: string[] = []
   let skipped = 0
 
-  if (!isProxyConfigured()) {
-    errors.push('Proxy non configuré — valorisation via prix manuels / import uniquement.')
-    return { updated, errors, skipped }
+  const byKey = new Map<string, Support>()
+  for (const s of supports) {
+    const key = quoteKeyForSupport(s)
+    if (key && !byKey.has(key)) byKey.set(key, s)
   }
-
-  const tickers = [
-    ...new Set(
-      supports.map((s) => s.yahooTicker).filter((t): t is string => Boolean(t)),
-    ),
-  ]
-
-  if (!tickers.length) {
-    errors.push('Aucun ticker Yahoo associé — renseignez les correspondances d’abord.')
+  if (!byKey.size) {
+    errors.push(
+      'Aucun ISIN ni ticker Yahoo associé — renseignez les correspondances d’abord.',
+    )
     return { updated, errors, skipped }
   }
 
   const end = todayISO()
-  // Clamp very old starts (Yahoo/GAS ~2y practical window)
-  let start = historyStart
+  // Yahoo / Morningstar practical window: 2 years
   const minStart = new Date()
   minStart.setUTCFullYear(minStart.getUTCFullYear() - 2)
   const minStartIso = minStart.toISOString().slice(0, 10)
-  if (start < minStartIso) start = minStartIso
+  const start = historyStart < minStartIso ? minStartIso : historyStart
 
+  const keys = [...byKey.keys()]
+  const cachedRows = await db.quoteCache.bulkGet(keys)
   const plans: RefreshPlan[] = []
-  for (let i = 0; i < tickers.length; i++) {
-    const ticker = tickers[i]
-    onProgress?.({
-      current: i + 1,
-      total: tickers.length,
-      ticker: `prépare ${ticker}`,
+  keys.forEach((key, i) => {
+    const cached = cachedRows[i]
+    if (historyIsFresh(cached, start, end)) {
+      skipped++
+      return
+    }
+    const s = byKey.get(key)!
+    plans.push({
+      key,
+      isin: isValidIsin(s.isin) ? s.isin.toUpperCase() : undefined,
+      yahooTicker: s.yahooTicker,
+      cached,
     })
-    const cached = await db.quoteCache.get(ticker)
-    let period1 = start
-
-    if (historyLooksUsable(cached, start, end)) {
-      skipped++
-      continue
-    }
-
-    if (cached?.bars.length) {
-      const last = cached.bars[cached.bars.length - 1].date
-      const first = cached.bars[0].date
-      // Thin cache (e.g. 1 spot) → full window from start
-      if (cached.bars.length >= 20 && first <= start) {
-        const d = new Date(last + 'T00:00:00Z')
-        d.setUTCDate(d.getUTCDate() - 5)
-        const resume = d.toISOString().slice(0, 10)
-        period1 = resume < start ? start : resume
-      } else {
-        period1 = start
-      }
-    }
-
-    if (period1 > end) {
-      skipped++
-      continue
-    }
-    plans.push({ ticker, period1, cached })
-  }
-
+  })
   if (!plans.length) return { updated, errors, skipped }
 
-  // Group by period1 so bulk fetch uses one Yahoo window per group
-  const byPeriod = new Map<string, RefreshPlan[]>()
-  for (const p of plans) {
-    const list = byPeriod.get(p.period1) ?? []
-    list.push(p)
-    byPeriod.set(p.period1, list)
+  const total = plans.length
+  let done = 0
+  const writes: QuoteSeries[] = []
+  const store = (plan: RefreshPlan, bars: QuoteBar[]) => {
+    writes.push({
+      ticker: plan.key,
+      bars: preferIncomingHistory(plan.cached?.bars, bars),
+      updatedAt: new Date().toISOString(),
+    })
+    updated.push(plan.key)
   }
 
-  let done = 0
-  const total = plans.length
+  // 1) Morningstar — one screener call for all ISINs, then series concurrently
+  onProgress?.({ current: 0, total, ticker: 'Morningstar…' })
+  let listings: MorningstarHit[] = []
+  try {
+    listings = await searchMorningstarByIsins(
+      plans.map((p) => p.isin).filter((i): i is string => Boolean(i)),
+    )
+  } catch {
+    // Everything falls through to the proxy
+  }
+  const forProxy: RefreshPlan[] = []
+  await mapPool(plans, 6, async (plan) => {
+    let bars: QuoteBar[] | null = null
+    try {
+      bars = await morningstarHistory(plan, listings, start)
+    } catch {
+      bars = null
+    }
+    if (bars) {
+      done++
+      onProgress?.({ current: done, total, ticker: plan.key })
+      store(plan, bars)
+    } else {
+      forProxy.push(plan)
+    }
+  })
 
-  for (const [period1, group] of byPeriod) {
-    const names = group.map((g) => g.ticker)
+  // 2) GAS proxy for the rest (only Yahoo tickers can go there)
+  const proxyPlans = forProxy.filter((p) => p.yahooTicker)
+  for (const p of forProxy) {
+    if (!p.yahooTicker) {
+      done++
+      errors.push(`${p.key}: absent de Morningstar et sans ticker Yahoo`)
+    }
+  }
+  if (proxyPlans.length && !isProxyConfigured()) {
+    errors.push(
+      `${proxyPlans.length} titre(s) hors Morningstar — proxy non configuré pour Yahoo.`,
+    )
+    proxyPlans.length = 0
+  }
+  if (proxyPlans.length) {
     onProgress?.({
       current: done + 1,
       total,
-      ticker: `bulk ${names.length} titre(s)…`,
+      ticker: `proxy ${proxyPlans.length} titre(s)…`,
     })
-
     let histories = new Map<string, QuoteBar[]>()
-    let bulkOk = false
     try {
-      histories = await fetchHistoryBulk(names, period1, end)
-      bulkOk = true
-    } catch (e) {
-      // Fall through to concurrent singles
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/Action inconnue|historybulk/i.test(msg)) {
-        // Still try per-ticker for resilience
-      }
+      histories = await fetchHistoryBulk(
+        proxyPlans.map((p) => p.yahooTicker!),
+        start,
+        end,
+      )
+    } catch {
+      // Singles below
     }
-
-    if (bulkOk) {
-      const missing: RefreshPlan[] = []
-      for (const plan of group) {
-        done++
-        onProgress?.({ current: done, total, ticker: plan.ticker })
-        const bars = histories.get(plan.ticker) ?? []
-        if (!bars.length) {
-          // Bulk omitted / Yahoo empty — always retry singly (Boursorama fallback)
-          missing.push(plan)
-          continue
-        }
-        // Reject spot-only payloads so we still hit Boursorama via single history
-        if (bars.length < 5 && (plan.cached?.bars.length ?? 0) < 20) {
-          missing.push(plan)
-          continue
-        }
-        try {
-          await db.quoteCache.put({
-            ticker: plan.ticker,
-            bars: preferIncomingHistory(plan.cached?.bars, bars),
-            updatedAt: new Date().toISOString(),
-          })
-          updated.push(plan.ticker)
-        } catch (e) {
-          errors.push(
-            `${plan.ticker}: ${e instanceof Error ? e.message : String(e)}`,
-          )
-        }
+    const gaps: RefreshPlan[] = []
+    for (const plan of proxyPlans) {
+      const bars = histories.get(plan.yahooTicker!) ?? []
+      // Spot-only payloads → retry singly (GAS Boursorama fallback)
+      if (bars.length < 5) {
+        gaps.push(plan)
+        continue
       }
-      if (missing.length) {
-        await mapPool(missing, 6, async (plan) => {
-          onProgress?.({ current: done, total, ticker: plan.ticker })
-          try {
-            const bars = await fetchHistoryRange(plan.ticker, plan.period1, end)
-            if (!bars.length) {
-              errors.push(`${plan.ticker}: historique vide`)
-              return
-            }
-            await db.quoteCache.put({
-              ticker: plan.ticker,
-              bars: preferIncomingHistory(plan.cached?.bars, bars),
-              updatedAt: new Date().toISOString(),
-            })
-            updated.push(plan.ticker)
-          } catch (e) {
-            errors.push(
-              `${plan.ticker}: ${e instanceof Error ? e.message : String(e)}`,
-            )
-          }
-        })
-      }
-      continue
-    }
-
-    // Concurrent fallback (old GAS or bulk failed)
-    await mapPool(group, 6, async (plan) => {
       done++
-      onProgress?.({ current: done, total, ticker: plan.ticker })
+      onProgress?.({ current: done, total, ticker: plan.key })
+      store(plan, bars)
+    }
+    await mapPool(gaps, 6, async (plan) => {
       try {
-        const bars = await fetchHistoryRange(plan.ticker, plan.period1, end)
-        if (!bars.length && !(plan.cached?.bars.length)) {
-          errors.push(`${plan.ticker}: historique vide`)
-          return
-        }
-        await db.quoteCache.put({
-          ticker: plan.ticker,
-          bars: preferIncomingHistory(plan.cached?.bars, bars),
-          updatedAt: new Date().toISOString(),
-        })
-        updated.push(plan.ticker)
+        const bars = await fetchHistoryRange(plan.yahooTicker!, start, end)
+        done++
+        onProgress?.({ current: done, total, ticker: plan.key })
+        if (bars.length) store(plan, bars)
+        else errors.push(`${plan.key}: historique vide`)
       } catch (e) {
-        errors.push(
-          `${plan.ticker}: ${e instanceof Error ? e.message : String(e)}`,
-        )
+        done++
+        errors.push(`${plan.key}: ${e instanceof Error ? e.message : String(e)}`)
       }
     })
   }
 
+  if (writes.length) await db.quoteCache.bulkPut(writes)
   return { updated, errors, skipped }
 }
 
-async function mapPool<T>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<void>,
-): Promise<void> {
-  let next = 0
-  const workers = Array.from(
-    { length: Math.min(concurrency, Math.max(1, items.length)) },
-    async () => {
-      while (next < items.length) {
-        const i = next++
-        await fn(items[i])
-      }
-    },
-  )
-  await Promise.all(workers)
-}
-
-/** True if we have at least one non-empty Yahoo series in cache. */
+/** True if we have at least one non-empty series in cache. */
 export async function hasAnyQuoteHistory(): Promise<boolean> {
   const all = await db.quoteCache.toArray()
   return all.some((q) => q.bars.length > 0)

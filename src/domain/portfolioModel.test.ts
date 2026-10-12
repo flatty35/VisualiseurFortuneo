@@ -48,6 +48,24 @@ describe('Portfolio model', () => {
     expect(b.niceUniqueName).toBe('VINCI')
   })
 
+  it('upsert with undefined fields keeps stored values (re-import)', () => {
+    const p = new Portfolio()
+    p.upsertSupport({
+      niceUniqueName: 'VINCI',
+      ISIN: 'FR0000125486',
+      yahooFinanceTicker: 'DG.PA',
+      staticDatedValues: [[0, 100]],
+    })
+    const s = p.upsertSupport({
+      niceUniqueName: 'VINCI',
+      ISIN: 'FR0000125486',
+      yahooFinanceTicker: undefined,
+      staticDatedValues: undefined,
+    })
+    expect(s.yahooFinanceTicker).toBe('DG.PA')
+    expect(s.staticDatedValues).toEqual([[0, 100]])
+  })
+
   it('supportKey prefers ISIN then localKey', () => {
     expect(
       new Support({ uniqueID: 1, ISIN: 'FR0000125486' }).supportKey(),

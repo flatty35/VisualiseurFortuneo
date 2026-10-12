@@ -9,8 +9,12 @@ import {
   isQualifiedYahooTicker,
   nameMatchBonus,
   passesNameQualityGate,
+  sameLibelle,
+  shareClassConflict,
   usListingPenalty,
 } from './nameMatch'
+
+const LEVERAGE_TYPES = /certificat|warrant|turbo|optionsschein|bon d/i
 import { normalizeMatchKey } from './tickerSeed'
 
 /**
@@ -98,7 +102,8 @@ function placeSuffix(place: string): string | undefined {
 
 /** Guess Yahoo Finance ticker from Fortuneo mnemo + place. Never returns a bare mnemo. */
 export function guessYahooTicker(hit: FortuneoHit): string | undefined {
-  const mnemo = (hit.mnemo || '').trim()
+  // Some trackers come back as « NTSZ-XPAR » (mnemo + MIC)
+  const mnemo = (hit.mnemo || '').trim().replace(/-X[A-Z]{3}$/, '')
   if (!mnemo) return undefined
   // codePlace 23 = Euronext Paris (empirique Accès Marchés)
   if (hit.codePlace === 23) {
@@ -279,8 +284,19 @@ export function scoreFortuneoHit(hit: FortuneoHit, name: string): number {
   if (isValidIsin(isin)) score += 25
 
   const yahoo = guessYahooTicker(hit)
-  score += nameMatchBonus(name, hit.libelle || '')
+  const libelle = hit.libelle || ''
+  score += nameMatchBonus(name, libelle)
   score += usListingPenalty(isin, yahoo)
+  // Fortuneo libellés are the export libellés: exact match picks the class
+  if (sameLibelle(name, libelle)) score += 40
+  if (shareClassConflict(name, libelle)) score -= 60
+  // Turbos / certificats « sur NOVO-NORDISK B » share the underlying's name
+  if (
+    LEVERAGE_TYPES.test(hit.type || '') &&
+    !LEVERAGE_TYPES.test(name)
+  ) {
+    score -= 80
+  }
 
   // Reject weak name matches for multi-token queries
   if (!passesNameQualityGate(name, hit.libelle || '')) {
@@ -347,10 +363,7 @@ export async function searchFortuneo(
   try {
     const url = `${API}?term=${encodeURIComponent(q)}`
     const res = await fetch(url, {
-      headers: {
-        Accept: 'application/json',
-        Referer: 'https://bourse.fortuneo.fr/',
-      },
+      headers: { Accept: 'application/json' },
       signal: options?.signal ?? AbortSignal.timeout(12_000),
     })
     if (!res.ok) {

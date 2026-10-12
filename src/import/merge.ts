@@ -62,6 +62,17 @@ export async function mergeImport(input: {
   const fresh = titresOps.filter((o) => !existingFp.has(o.fingerprint))
   const skippedDuplicates = titresOps.length - fresh.length
 
+  // Ops stored before « Place » was parsed: backfill the listing hint
+  const placeByFp = new Map(
+    titresOps.filter((o) => o.place).map((o) => [o.fingerprint, o.place!]),
+  )
+  for (const op of env.operations) {
+    const place = placeByFp.get(op.fingerprint)
+    if (place && !op.customDetails.place) {
+      op.customDetails = { ...op.customDetails, place }
+    }
+  }
+
   mergeFlatOpsIntoPortfolio(portfolio, envelope, fresh)
 
   const projected = projectPortfolio(portfolio)
@@ -76,19 +87,24 @@ export async function mergeImport(input: {
     if (!p.isin || p.isin === 'CASH' || p.isin === 'EUR') continue
     const n = p.name.toLowerCase()
     if (n.includes('espec') || n.includes('liquidit')) continue
+    const isLocal = p.isin.startsWith('LOCAL:')
+    const importPrice = p.price ?? p.pru
+    const existing = portfolio.findSupportByKey(p.isin)
     portfolio.upsertSupport({
       niceUniqueName: p.name,
-      ISIN: p.isin.startsWith('LOCAL:') ? '' : p.isin,
-      localKey: p.isin.startsWith('LOCAL:') ? p.isin : '',
+      ISIN: isLocal ? '' : p.isin,
+      localKey: isLocal ? p.isin : '',
       assetType: AssetType.ACTIONS,
-      lastKnownValue:
-        p.price !== undefined || p.pru !== undefined
-          ? ([0, p.price ?? p.pru ?? 0] as [number, number])
-          : undefined,
-      staticDatedValues:
-        p.price !== undefined || p.pru !== undefined
-          ? [[0, p.price ?? p.pru ?? 0]]
-          : undefined,
+      ...(importPrice !== undefined
+        ? {
+            lastKnownValue: [0, importPrice] as [number, number],
+            // Replace only the undated fallback; keep manual dated prices
+            staticDatedValues: [
+              ...(existing?.staticDatedValues ?? []).filter(([ts]) => ts > 0),
+              [0, importPrice] as [number, number],
+            ],
+          }
+        : {}),
     })
   }
   for (const o of allOps) {

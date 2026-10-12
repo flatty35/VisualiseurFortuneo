@@ -5,6 +5,7 @@
  */
 
 import type { QuoteBar } from '@/domain/types'
+import { mapPool } from './mapPool'
 
 const PROXY_URL = import.meta.env.VITE_PROXY_URL as string | undefined
 
@@ -139,63 +140,45 @@ export async function fetchHistoryBulk(
   }
 
   const CHUNK = 40
+  const slices: string[][] = []
   for (let i = 0; i < clean.length; i += CHUNK) {
-    const slice = clean.slice(i, i + CHUNK)
-    try {
-      const data = await gasGet<{
-        histories?: Record<string, QuoteBar[]>
-        error?: string
-      }>(
-        {
-          action: 'historybulk',
-          tickers: slice.join(','),
-          period1,
-          period2,
-        },
-        90_000,
-      )
-      for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
-        out.set(
-          ticker,
-          (bars ?? []).map((b) => ({ date: b.date, close: b.close })),
+    slices.push(clean.slice(i, i + CHUNK))
+  }
+  // Chunks are independent GAS executions → run them concurrently
+  await Promise.all(
+    slices.map(async (slice) => {
+      try {
+        const data = await gasGet<{
+          histories?: Record<string, QuoteBar[]>
+          error?: string
+        }>(
+          {
+            action: 'historybulk',
+            tickers: slice.join(','),
+            period1,
+            period2,
+          },
+          90_000,
         )
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      // Old GAS deploy without historybulk
-      if (/Action inconnue|historybulk/i.test(msg)) {
+        for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
+          out.set(
+            ticker,
+            (bars ?? []).map((b) => ({ date: b.date, close: b.close })),
+          )
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        // Old GAS deploy without historybulk
+        if (!/Action inconnue|historybulk/i.test(msg)) throw e
         const settled = await mapPool(slice, 6, async (t) => {
           const bars = await fetchHistoryRange(t, period1, period2)
           return [t, bars] as const
         })
         for (const [t, bars] of settled) out.set(t, bars)
-        continue
       }
-      throw e
-    }
-  }
-  return out
-}
-
-/** Run async work over items with a fixed concurrency limit. */
-async function mapPool<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length)
-  let next = 0
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    async () => {
-      while (next < items.length) {
-        const i = next++
-        results[i] = await fn(items[i], i)
-      }
-    },
+    }),
   )
-  await Promise.all(workers)
-  return results
+  return out
 }
 
 export interface YahooSearchHit {

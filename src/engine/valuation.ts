@@ -46,8 +46,20 @@ function yahooBelievable(yahooPx: number, support: Support): boolean {
 }
 
 /**
+ * Quote-cache key of a support: its Yahoo ticker, else its real ISIN
+ * (Morningstar history needs no ticker — e.g. OPCVM absent from Yahoo).
+ */
+export function quoteKeyForSupport(
+  support: Pick<Support, 'isin' | 'yahooTicker'>,
+): string | undefined {
+  if (support.yahooTicker) return support.yahooTicker
+  const isin = support.isin.trim().toUpperCase()
+  return /^[A-Z]{2}[A-Z0-9]{10}$/.test(isin) ? isin : undefined
+}
+
+/**
  * Market / manual / static price for a support on a calendar day.
- * Forward-fills at most {@link FORWARD_FILL_MAX_DAYS} before the first Yahoo bar
+ * Forward-fills at most {@link FORWARD_FILL_MAX_DAYS} before the first bar
  * (weekend / late listing). A single spot bar must NOT paint the whole history.
  */
 export function priceOnDate(
@@ -57,8 +69,8 @@ export function priceOnDate(
 ): number | undefined {
   if (!support) return undefined
 
-  // 1) Yahoo history (market) — preferred when believable vs broker NAV
-  const ticker = support.yahooTicker
+  // 1) Market history — preferred when believable vs broker NAV
+  const ticker = quoteKeyForSupport(support)
   if (ticker) {
     const bars = quotes.get(ticker)
     if (bars?.length) {

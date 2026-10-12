@@ -172,9 +172,11 @@ export default function TriPage() {
       <section className="panel">
         <h1 style={{ marginTop: 0 }}>TRI (IRR)</h1>
         <p className="muted">
-          XIRR : achat synthétique en début de période, chaque achat titres =
-          apport (−), chaque vente = retrait (+), revente synthétique en fin —
-          sans frais d’ordre. TRI N / N−1 / N−2 = années calendaires autonomes.
+          XIRR (base 365 j) : achat synthétique en début de période, chaque
+          achat titres = apport (−, montant net courtage inclus), chaque vente
+          = retrait (+, net de courtage), dividendes encaissés = retrait (+),
+          TTF / frais = apport (−), revente synthétique en fin. TRI N / N−1 /
+          N−2 = années calendaires autonomes.
         </p>
 
         <div className="grid-2" style={{ marginTop: '1rem' }}>
@@ -269,7 +271,7 @@ export default function TriPage() {
             </div>
             {external && (
               <div className="kpi-card">
-                <div className="label">Apports / retraits (titres)</div>
+                <div className="label">Apports nets (achats − ventes − dividendes)</div>
                 <div className="value" style={{ fontSize: '1.4rem' }}>
                   {external.net.toLocaleString('fr-FR', {
                     style: 'currency',
