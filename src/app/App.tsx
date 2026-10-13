@@ -26,6 +26,9 @@ export default function App() {
         <div className="brand">
           <img src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" />
           Visualiseur PEA &amp; CTO <span>Fortuneo · Saxo</span>
+          <span className="badge brand-beta" title="Version bêta — résultats à vérifier">
+            Beta
+          </span>
         </div>
         <nav className="nav-links">
           {links.map((l) => (

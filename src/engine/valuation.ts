@@ -26,32 +26,69 @@ function calendarDaysBetween(a: string, b: string): number {
   return Math.round(ms / 86_400_000)
 }
 
-function anchorPrice(support: Support): number | undefined {
-  if (support.staticPrice !== undefined && support.staticPrice > 0) {
-    return support.staticPrice
-  }
+/** Last strictly positive trade/static price (ignore 0€ worthless exits). */
+function anchorPrice(support: Support, onOrBefore?: string): number | undefined {
   const manuals = support.manualPrices
   if (manuals?.length) {
-    const last = [...manuals].sort((a, b) => b.date.localeCompare(a.date))[0]
-    if (last && last.price > 0) return last.price
+    const positive = manuals
+      .filter(
+        (p) =>
+          p.price > 0 &&
+          (onOrBefore === undefined || p.date <= onOrBefore),
+      )
+      .sort((a, b) => b.date.localeCompare(a.date))
+    if (positive[0]) return positive[0].price
+    // No trade yet on/before date — allow a later seed as soft anchor
+    if (onOrBefore !== undefined) {
+      const later = manuals
+        .filter((p) => p.price > 0 && p.date > onOrBefore)
+        .sort((a, b) => a.date.localeCompare(b.date))
+      if (later[0]) return later[0].price
+    }
+  }
+  if (support.staticPrice !== undefined && support.staticPrice > 0) {
+    return support.staticPrice
   }
   return undefined
 }
 
-function yahooBelievable(yahooPx: number, support: Support): boolean {
-  const anchor = anchorPrice(support)
+function yahooBelievable(
+  yahooPx: number,
+  support: Support,
+  onDate?: string,
+): boolean {
+  const anchor = anchorPrice(support, onDate)
   if (anchor === undefined || !(anchor > 0) || !(yahooPx > 0)) return true
   const ratio = yahooPx / anchor
-  return ratio <= YAHOO_VS_STATIC_MAX_RATIO && ratio >= 1 / YAHOO_VS_STATIC_MAX_RATIO
+  return (
+    ratio <= YAHOO_VS_STATIC_MAX_RATIO &&
+    ratio >= 1 / YAHOO_VS_STATIC_MAX_RATIO
+  )
+}
+
+/** Name heuristic when `tradeQuotesOnly` was not persisted (older imports). */
+export function looksLikeDerivativeName(name: string | undefined): boolean {
+  if (!name) return false
+  // "8 P" / "171.95 C" = Saxo option/turbo style; TurboXL / Warrant / Put…
+  return /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\boption\b|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+    name,
+  )
 }
 
 /**
  * Quote-cache key of a support: its Yahoo ticker, else its real ISIN
  * (Morningstar history needs no ticker — e.g. OPCVM absent from Yahoo).
+ * Derivatives never use the market feed (underlying × contract size ≠ premium).
  */
 export function quoteKeyForSupport(
-  support: Pick<Support, 'isin' | 'yahooTicker'>,
+  support: Pick<
+    Support,
+    'isin' | 'name' | 'yahooTicker' | 'tradeQuotesOnly'
+  >,
 ): string | undefined {
+  if (support.tradeQuotesOnly || looksLikeDerivativeName(support.name)) {
+    return undefined
+  }
   if (support.yahooTicker) return support.yahooTicker
   const isin = support.isin.trim().toUpperCase()
   return /^[A-Z]{2}[A-Z0-9]{10}$/.test(isin) ? isin : undefined
@@ -86,7 +123,7 @@ export function priceOnDate(
           hi = mid - 1
         }
       }
-      if (bestBefore !== undefined && yahooBelievable(bestBefore, support)) {
+      if (bestBefore !== undefined && yahooBelievable(bestBefore, support, date)) {
         return bestBefore
       }
       // Short forward-fill only — not years of a lone "last price" bar
@@ -95,7 +132,7 @@ export function priceOnDate(
         first &&
         first.date >= date &&
         calendarDaysBetween(date, first.date) <= FORWARD_FILL_MAX_DAYS &&
-        yahooBelievable(first.close, support)
+        yahooBelievable(first.close, support, date)
       ) {
         return first.close
       }

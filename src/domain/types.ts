@@ -50,6 +50,11 @@ export interface Support {
    * Yahoo/Morningstar closes are in this currency; chart display follows it.
    */
   quoteCurrency?: string
+  /**
+   * Options / turbos / warrants: never pull Yahoo/Morningstar (underlying
+   * prices × contract size explode the valuation). Use trade-seeded manuals.
+   */
+  tradeQuotesOnly?: boolean
 }
 
 export interface Operation {

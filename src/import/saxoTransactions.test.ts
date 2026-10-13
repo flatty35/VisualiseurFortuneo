@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   excelSerialToIso,
+  isSaxoDerivative,
+  isSaxoDerivativeType,
   parseSaxoTradeEvent,
   parseSaxoWorkbook,
   yahooFromSaxoSymbol,
@@ -34,6 +36,26 @@ describe('saxo helpers', () => {
     expect(yahooFromSaxoSymbol('CH1595275830:cats')).toBeUndefined()
   })
 
+  it('flags Warrant / MiniFuture / StockOption types as derivatives', () => {
+    expect(isSaxoDerivativeType('WarrantOpenEndKnockOut')).toBe(true)
+    expect(isSaxoDerivativeType('MiniFuture')).toBe(true)
+    expect(isSaxoDerivativeType('StockOption')).toBe(true)
+    expect(isSaxoDerivativeType('Stock')).toBe(false)
+    expect(isSaxoDerivativeType('Etf')).toBe(false)
+    expect(isSaxoDerivativeType('Etc')).toBe(false)
+    expect(isSaxoDerivativeType('Cash')).toBe(false)
+    expect(
+      isSaxoDerivative('MiniFuture', 'Vusion Turbo Call 69.11 SOG', ''),
+    ).toBe(true)
+    expect(
+      isSaxoDerivative(
+        'WarrantOpenEndKnockOut',
+        'Moderna TurboXL Short 171.95 Saxo',
+        'CH1595275830:cats',
+      ),
+    ).toBe(true)
+  })
+
   it('converts Excel serials to ISO dates', () => {
     // 45901 ≈ 2025-09-01-ish — just check shape + monotonicity
     const a = excelSerialToIso(45901)
@@ -59,10 +81,32 @@ describe('parseSaxoWorkbook (live testData)', () => {
       'testData/saxo/Transactions_21044853_2026-01-01_2026-10-13.xlsx',
     )
     const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
-    const { operations, positions, inferredCash, currencyHints } =
-      parseSaxoWorkbook(ab as ArrayBuffer, 'CTO_SAXO')
+    const {
+      operations,
+      positions,
+      inferredCash,
+      currencyHints,
+      tradeQuotesOnlyKeys,
+    } = parseSaxoWorkbook(ab as ArrayBuffer, 'CTO_SAXO')
 
     expect(operations.length).toBeGreaterThan(40)
+    // Warrant / MiniFuture / StockOption → trade-only quotes (no Yahoo)
+    expect(tradeQuotesOnlyKeys).toContain('CH1595275830')
+    expect(
+      tradeQuotesOnlyKeys.some((k) => /solana/i.test(k)),
+    ).toBe(true)
+    const vusionIsins = [
+      ...new Set(
+        operations
+          .filter((o) => /vusion/i.test(o.name ?? ''))
+          .map((o) => o.isin)
+          .filter(Boolean),
+      ),
+    ] as string[]
+    expect(vusionIsins.length).toBeGreaterThan(0)
+    expect(vusionIsins.every((k) => tradeQuotesOnlyKeys.includes(k))).toBe(
+      true,
+    )
     expect(operations.every((o) => o.envelope === 'CTO_SAXO')).toBe(true)
     expect(operations.some((o) => o.type === 'ACHAT')).toBe(true)
     expect(operations.some((o) => o.type === 'VENTE')).toBe(true)

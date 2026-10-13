@@ -460,6 +460,20 @@ a:hover {
   font-weight: 500;
 }
 
+.brand .brand-beta {
+  margin-left: 0.15rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: rgba(240, 180, 41, 0.14);
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  line-height: 1.2;
+}
+
 .nav-links {
   display: flex;
   flex-wrap: wrap;

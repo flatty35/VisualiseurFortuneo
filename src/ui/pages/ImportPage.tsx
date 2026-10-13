@@ -93,6 +93,7 @@ export default function ImportPage() {
       let inferredCash: number | undefined
       let tickerHints: Record<string, string> = {}
       let currencyHints: Record<string, string> = {}
+      let tradeQuotesOnlyKeys: string[] = []
 
       if (broker === 'saxo') {
         const parsed = await parseSaxoTransactionsFile(saxoFile!, envelope)
@@ -101,6 +102,7 @@ export default function ImportPage() {
         inferredCash = parsed.inferredCash
         tickerHints = parsed.tickerHints
         currencyHints = parsed.currencyHints
+        tradeQuotesOnlyKeys = parsed.tradeQuotesOnlyKeys
       } else {
         ;[titresOps, pos] = await Promise.all([
           parseTitresCsv(titres!, envelope),
@@ -135,45 +137,57 @@ export default function ImportPage() {
           broker === 'saxo' && Object.keys(currencyHints).length
             ? currencyHints
             : undefined,
+        tradeQuotesOnlyKeys:
+          broker === 'saxo' && tradeQuotesOnlyKeys.length
+            ? tradeQuotesOnlyKeys
+            : undefined,
       })
 
       if (broker === 'saxo') {
         r.warnings.push(
           'Saxo : positions actuelles dérivées de l’historique (compte depuis l’ouverture). Pas de fichier positions séparé.',
         )
-        const hints = Object.entries(tickerHints)
-        if (hints.length) {
-          const supports = await listFlatSupports()
-          const updates = supports
-            .filter(
-              (s) =>
-                (!s.yahooTicker && tickerHints[s.isin]) ||
-                (!s.quoteCurrency && currencyHints[s.isin]),
-            )
-            .map((s) => {
-              const t = tickerHints[s.isin]
-              const cur = currencyHints[s.isin]
+        const derivSet = new Set(tradeQuotesOnlyKeys)
+        const supports = await listFlatSupports()
+        const updates = supports
+          .filter(
+            (s) =>
+              derivSet.has(s.isin) ||
+              (!s.tradeQuotesOnly &&
+                ((!s.yahooTicker && tickerHints[s.isin]) ||
+                  (!s.quoteCurrency && currencyHints[s.isin]))),
+          )
+          .map((s) => {
+            if (derivSet.has(s.isin)) {
               return {
                 ...s,
-                ...(t && !s.yahooTicker
-                  ? {
-                      yahooTicker: t,
-                      googleTicker: s.googleTicker ?? googleTickerFromYahoo(t),
-                    }
-                  : {}),
-                ...(cur && !s.quoteCurrency
-                  ? { quoteCurrency: cur.toUpperCase() }
-                  : {}),
+                tradeQuotesOnly: true,
+                yahooTicker: undefined,
+                googleTicker: undefined,
               }
-            })
-          if (updates.length) {
-            await putFlatSupports(updates)
-            const tickers = updates.filter((s) => s.yahooTicker).length
-            if (tickers) {
-              r.warnings.push(
-                `Saxo : ${tickers} ticker(s) Yahoo préremplis depuis le symbole (ex. FOLOW:xpar → FOLOW.PA).`,
-              )
             }
+            const t = tickerHints[s.isin]
+            const cur = currencyHints[s.isin]
+            return {
+              ...s,
+              ...(t && !s.yahooTicker
+                ? {
+                    yahooTicker: t,
+                    googleTicker: s.googleTicker ?? googleTickerFromYahoo(t),
+                  }
+                : {}),
+              ...(cur && !s.quoteCurrency
+                ? { quoteCurrency: cur.toUpperCase() }
+                : {}),
+            }
+          })
+        if (updates.length) {
+          await putFlatSupports(updates)
+          const tickers = updates.filter((s) => s.yahooTicker).length
+          if (tickers) {
+            r.warnings.push(
+              `Saxo : ${tickers} ticker(s) Yahoo préremplis depuis le symbole (ex. FOLOW:xpar → FOLOW.PA).`,
+            )
           }
         }
       }

@@ -5,7 +5,7 @@ import type {
   ParsedPosition,
   VirtualOpening,
 } from '@/domain/types'
-import { AssetType } from '@/domain/portfolioModel'
+import { AssetType, GetterType } from '@/domain/portfolioModel'
 import {
   applyVirtualOpeningSeeds,
   envelopeTypeToKind,
@@ -30,6 +30,8 @@ export async function mergeImport(input: {
   skipVirtualOpening?: boolean
   /** ISIN → quote currency (USD, …) from broker file. */
   currencyHints?: Record<string, string>
+  /** Options / turbos: force trade-only quotes (no Yahoo). */
+  tradeQuotesOnlyKeys?: string[]
 }): Promise<ImportReport> {
   const { envelope, positions } = input
   const warnings: string[] = []
@@ -137,6 +139,34 @@ export async function mergeImport(input: {
   if (seededBars > 0) {
     warnings.push(
       `${seededBars} cotation(s) issues des prix d’opération (secours turbos / absents Yahoo).`,
+    )
+  }
+
+  // Derivatives: lock to trade prices (underlying Yahoo × contract size ≠ premium)
+  const derivKeys = new Set(input.tradeQuotesOnlyKeys ?? [])
+  for (const o of allOps) {
+    if (
+      o.isin &&
+      /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\boption\b|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+        o.name ?? o.label ?? '',
+      )
+    ) {
+      derivKeys.add(o.isin)
+    }
+  }
+  let derivMarked = 0
+  for (const key of derivKeys) {
+    const s = portfolio.findSupportByKey(key)
+    if (!s || s.tradeQuotesOnly) continue
+    s.tradeQuotesOnly = true
+    s.yahooFinanceTicker = ''
+    s.googleFinanceTicker = ''
+    s.getterType = GetterType.STATIC
+    derivMarked += 1
+  }
+  if (derivMarked > 0) {
+    warnings.push(
+      `${derivMarked} dérivé(s) (turbo / option / warrant) : cotation uniquement via les prix d’opération.`,
     )
   }
   supportsCreated = Math.max(

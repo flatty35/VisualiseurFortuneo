@@ -383,9 +383,17 @@ export async function autoResolveSupports(
   },
 ): Promise<AutoResolveReport> {
   const projected = await loadProjected()
-  const list = (supports ?? projected.supports).filter(
-    (s) => options?.force || isLocalSupportId(s.isin) || !s.yahooTicker,
-  )
+  const list = (supports ?? projected.supports).filter((s) => {
+    if (s.tradeQuotesOnly) return false
+    if (
+      /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\boption\b|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+        s.name ?? '',
+      )
+    ) {
+      return false
+    }
+    return options?.force || isLocalSupportId(s.isin) || !s.yahooTicker
+  })
 
   const placeCounts = new Map<string, Map<string, number>>()
   const lastTrade = new Map<string, { date: string; price: number }>()

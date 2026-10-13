@@ -459,7 +459,14 @@ export async function applySeedMatches(supports?: Support[]): Promise<number> {
   const list = supports ?? (await listFlatSupports())
   const updates: Support[] = []
   for (const s of list) {
-    if (s.yahooTicker) continue
+    if (s.yahooTicker || s.tradeQuotesOnly) continue
+    if (
+      /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\boption\b|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+        s.name ?? '',
+      )
+    ) {
+      continue
+    }
     const seeded = lookupSeedTicker(s.name)
     if (!seeded) continue
     updates.push({
@@ -494,7 +501,12 @@ export async function autoMatchSupports(
   const force = Boolean(options.force)
   const onProgress = options.onProgress
 
-  let list = supports ?? (await listFlatSupports())
+  const isDeriv = (s: Support) =>
+    Boolean(s.tradeQuotesOnly) ||
+    /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\boption\b|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+      s.name ?? '',
+    )
+  let list = (supports ?? (await listFlatSupports())).filter((s) => !isDeriv(s))
   if (!force) {
     list = list.filter((s) => !s.yahooTicker)
   }

@@ -157,8 +157,10 @@ export function flatSupportToDomain(s: FlatSupport, uniqueID: number): Support {
   if (s.staticPrice !== undefined && Number.isFinite(s.staticPrice)) {
     manualAsStatic.push([0, s.staticPrice])
   }
+  const tradeOnly = Boolean(s.tradeQuotesOnly)
   let getterType: number = GetterType.END
-  if (s.yahooTicker) getterType = GetterType.YAHOO_FINANCE
+  if (tradeOnly) getterType = GetterType.STATIC
+  else if (s.yahooTicker) getterType = GetterType.YAHOO_FINANCE
   else if (s.staticPrice !== undefined || s.manualPrices?.length)
     getterType = GetterType.STATIC
   else if (s.boursoramaTicker) getterType = GetterType.BOURSORAMA
@@ -171,13 +173,14 @@ export function flatSupportToDomain(s: FlatSupport, uniqueID: number): Support {
     getterType,
     ISIN: isLocal ? '' : s.isin.toUpperCase(),
     localKey: isLocal ? s.isin : '',
-    yahooFinanceTicker: s.yahooTicker ?? '',
-    googleFinanceTicker: s.googleTicker ?? '',
+    yahooFinanceTicker: tradeOnly ? '' : (s.yahooTicker ?? ''),
+    googleFinanceTicker: tradeOnly ? '' : (s.googleTicker ?? ''),
     boursoramaTicker: s.boursoramaTicker ?? '',
     staticDatedValues: manualAsStatic,
     lastKnownValue:
       s.staticPrice !== undefined ? [0, s.staticPrice] : ([0, 0] as [number, number]),
     quoteCurrency: s.quoteCurrency || undefined,
+    tradeQuotesOnly: tradeOnly || undefined,
   })
 }
 
@@ -196,12 +199,17 @@ export function domainSupportToFlat(s: Support): FlatSupport {
     isin: s.supportKey(),
     uniqueID: s.uniqueID,
     name: s.niceUniqueName,
-    yahooTicker: s.yahooFinanceTicker || undefined,
-    googleTicker: s.googleFinanceTicker || undefined,
+    yahooTicker: s.tradeQuotesOnly
+      ? undefined
+      : s.yahooFinanceTicker || undefined,
+    googleTicker: s.tradeQuotesOnly
+      ? undefined
+      : s.googleFinanceTicker || undefined,
     boursoramaTicker: s.boursoramaTicker || undefined,
     manualPrices,
     staticPrice,
     quoteCurrency: s.quoteCurrency || undefined,
+    tradeQuotesOnly: s.tradeQuotesOnly || undefined,
   }
 }
 

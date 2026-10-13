@@ -122,9 +122,53 @@ function isExpiryEvent(event: string): boolean {
   return /^expiry\b/i.test(event.trim())
 }
 
-/** Saxo instrument types quoted per underlying unit (contract = N units). */
+/**
+ * Equity/index options: Saxo books « 1 @ premium » but the notional is
+ * contractSize × premium (typically ×100). MiniFuture / Warrant turbos do not.
+ */
 function hasContractMultiplier(instrumentType: string): boolean {
-  return /option|future/i.test(instrumentType)
+  return /stockoption/i.test(instrumentType)
+}
+
+/**
+ * Saxo column « Type » values that are not cash equity / ETF / ETC —
+ * must use trade prices only (Yahoo would quote the underlying).
+ * Seen in exports: StockOption, WarrantOpenEndKnockOut, MiniFuture, …
+ */
+export function isSaxoDerivativeType(instrumentType: string): boolean {
+  const t = instrumentType.trim()
+  if (!t) return false
+  return (
+    /stockoption/i.test(t) ||
+    /warrant/i.test(t) ||
+    /minifuture/i.test(t) ||
+    /knock.?out/i.test(t) ||
+    /^(future|option|certificate|turbo)$/i.test(t)
+  )
+}
+
+/**
+ * Options / turbos / warrants / knock-outs — not on Yahoo as such; the feed
+ * would return the underlying and blow up qty×price (e.g. put ×100 × ETF$).
+ */
+export function isSaxoDerivative(
+  instrumentType: string,
+  name = '',
+  symbol = '',
+): boolean {
+  if (isSaxoDerivativeType(instrumentType)) return true
+  if (
+    /turbo|warrant|knock.?out|\bputs?\b|\bcalls?\b|certificat|\b\d+(?:\.\d+)?\s*[PC]\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*20\d{2}/i.test(
+      name,
+    )
+  ) {
+    return true
+  }
+  // Saxo turbo listing (:cats) or OCC-style option root (SOLZ/20H26P8:xcbf)
+  if (/:cats\b/i.test(symbol) || /\/\d+[A-Z]\d{2}[PC]\d/i.test(symbol)) {
+    return true
+  }
+  return false
 }
 
 interface OpsRow {
@@ -237,6 +281,8 @@ export interface SaxoParseResult {
   tickerHints: Record<string, string>
   /** ISIN → instrument quote currency (USD, EUR, …). */
   currencyHints: Record<string, string>
+  /** Support keys (ISIN or LOCAL) that must not use Yahoo/Morningstar. */
+  tradeQuotesOnlyKeys: string[]
 }
 
 /**
@@ -262,6 +308,7 @@ export function parseSaxoWorkbook(
   const fpOccurrence = new Map<string, number>()
   const tickerHints: Record<string, string> = {}
   const currencyHints: Record<string, string> = {}
+  const tradeQuotesOnly = new Set<string>()
   const multipliers = new Map<string, number>()
   const pendingMultiplier: Array<{ index: number; key: string; qty: number }> = []
   let i = 0
@@ -399,7 +446,15 @@ export function parseSaxoWorkbook(
 
     const label = tradeId ? `${event} · #${tradeId}` : event
     const validIsin = /^[A-Z]{2}[A-Z0-9]{10}$/.test(isin) ? isin : undefined
-    const yahooHint = yahooFromSaxoSymbol(symbol)
+    const derivative = isSaxoDerivative(instrumentType, name ?? '', symbol)
+    const supportKey =
+      validIsin ??
+      (name
+        ? `LOCAL:${name.toLowerCase().replace(/\s+/g, '')}`
+        : undefined)
+    if (derivative && supportKey) tradeQuotesOnly.add(supportKey)
+
+    const yahooHint = derivative ? undefined : yahooFromSaxoSymbol(symbol)
     if (validIsin && yahooHint) tickerHints[validIsin] = yahooHint
     if (validIsin && instrumentCurrency) {
       currencyHints[validIsin] = instrumentCurrency.toUpperCase()
@@ -522,6 +577,7 @@ export function parseSaxoWorkbook(
     inferredCash,
     tickerHints,
     currencyHints,
+    tradeQuotesOnlyKeys: [...tradeQuotesOnly],
   }
 }
 

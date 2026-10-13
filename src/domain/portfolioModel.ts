@@ -291,6 +291,8 @@ export interface SupportData {
   localKey?: string
   /** Instrument / quote currency (USD, EUR, …) */
   quoteCurrency?: string
+  /** Derivatives: value from trade prices only (no Yahoo/Morningstar). */
+  tradeQuotesOnly?: boolean
 }
 
 export class Support {
@@ -311,6 +313,7 @@ export class Support {
   lastKnownValue: [number, number]
   localKey: string
   quoteCurrency: string
+  tradeQuotesOnly: boolean
 
   constructor(data: SupportData = {}) {
     this.uniqueID = data.uniqueID || 0
@@ -332,6 +335,7 @@ export class Support {
     this.lastKnownValue = data.lastKnownValue || [0, 0]
     this.localKey = data.localKey || ''
     this.quoteCurrency = data.quoteCurrency || ''
+    this.tradeQuotesOnly = Boolean(data.tradeQuotesOnly)
   }
 
   /** Primary display / join key: real ISIN, else LOCAL:…, else id */
@@ -360,6 +364,7 @@ export class Support {
       lastKnownValue: this.lastKnownValue,
       localKey: this.localKey,
       quoteCurrency: this.quoteCurrency || undefined,
+      tradeQuotesOnly: this.tradeQuotesOnly || undefined,
     }
   }
 }
