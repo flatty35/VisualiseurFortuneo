@@ -89,36 +89,9 @@ describe('Saxo derivative valuation (Solana put + Moderna turbo)', () => {
 
     // Poisonous underlying quotes that used to explode qty × ETF$/MRNA$
     const quotes = new Map<string, QuoteBar[]>([
-      [
-        solKey,
-        [{ date: '2026-03-10', close: 40, open: 40, high: 40, low: 40, volume: 0 }],
-      ],
-      [
-        'CH1595275830',
-        [
-          {
-            date: '2026-09-14',
-            close: 150,
-            open: 150,
-            high: 150,
-            low: 150,
-            volume: 0,
-          },
-        ],
-      ],
-      [
-        'MRNA',
-        [
-          {
-            date: '2026-09-14',
-            close: 150,
-            open: 150,
-            high: 150,
-            low: 150,
-            volume: 0,
-          },
-        ],
-      ],
+      [solKey, [{ date: '2026-03-10', close: 40 }]],
+      ['CH1595275830', [{ date: '2026-09-14', close: 150 }]],
+      ['MRNA', [{ date: '2026-09-14', close: 150 }]],
     ])
 
     const series = buildHoldingsSeries({
