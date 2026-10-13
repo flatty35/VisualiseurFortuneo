@@ -21,8 +21,9 @@ const CASH_LEDGER_TYPES = new Set<OperationType>([
  * Used for TRI apports/retraits — not for the cash pocket balance.
  */
 export function tradeCashAmount(op: Operation): number {
-  if (op.synthetic || !op.isin) return 0
-  // Ignore 0 — empty Montant net must not block the qty×prix fallback
+  if (op.synthetic) return 0
+  // Prefer booked Montant net (works for no-ISIN Saxo options too).
+  // Ignore exact 0 — empty Montant net must not block the qty×prix fallback
   // (0€ price + lost net → no TRI apport while valo jumps → TRI spike).
   if (
     op.netAmount !== undefined &&
@@ -31,6 +32,7 @@ export function tradeCashAmount(op: Operation): number {
   ) {
     return op.netAmount
   }
+  if (!op.isin) return 0
   if (
     op.quantity !== undefined &&
     op.price !== undefined &&

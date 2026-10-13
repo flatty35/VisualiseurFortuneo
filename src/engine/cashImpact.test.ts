@@ -56,6 +56,18 @@ describe('titres-only cash model', () => {
         'ledger',
       ),
     ).toBeCloseTo(-100)
+    // Options without ISIN still book Montant comptabilisé
+    expect(
+      cashImpact(
+        op({
+          type: 'VENTE',
+          label: 'Expiry',
+          netAmount: 17.11,
+          name: 'Solana put',
+        }),
+        'ledger',
+      ),
+    ).toBeCloseTo(17.11)
     expect(
       cashImpact(
         op({ type: 'FRAIS', label: 'Intérêts client', netAmount: -0.2 }),

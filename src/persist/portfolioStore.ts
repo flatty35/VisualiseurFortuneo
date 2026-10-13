@@ -107,12 +107,29 @@ export async function loadProjected(): Promise<{
 }> {
   const portfolio = await loadPortfolio()
   const projected = projectPortfolio(portfolio)
-  // Titres-only cash: ignore legacy espèces rows (no ISIN)
+  // Keep titre ops + Saxo cash-journal lines (versements / frais / … without ISIN).
+  // Drop only empty legacy shells that have neither an ISIN nor a cash type.
   return {
     portfolio,
     ...projected,
-    operations: projected.operations.filter((o) => o.synthetic || !!o.isin),
+    operations: projected.operations.filter(
+      (o) => o.synthetic || !!o.isin || isCashJournalOp(o.type),
+    ),
   }
+}
+
+/** Ops that move the cash pocket without being attached to a support. */
+function isCashJournalOp(type: Operation['type']): boolean {
+  return (
+    type === 'VERSEMENT' ||
+    type === 'RETRAIT' ||
+    type === 'FRAIS' ||
+    type === 'TAXE' ||
+    type === 'DIVIDENDE' ||
+    // Options / futures sometimes lack an ISIN but still book cash
+    type === 'ACHAT' ||
+    type === 'VENTE'
+  )
 }
 
 export async function loadEnvelopeProjected(envelope: EnvelopeType): Promise<{
