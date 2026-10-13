@@ -82,7 +82,7 @@ export default function DashboardPage() {
     const ok = confirm(
       'Réinitialiser tout le visualiseur ?\n\n' +
         'Cela efface définitivement dans ce navigateur :\n' +
-        '• opérations et positions (PEA / PEA-PME / CTO Fortuneo / CTO Saxo)\n' +
+        '• opérations et positions (PEA / PEA-PME / CTO — Fortuneo & Saxo)\n' +
         '• correspondances ISIN / tickers\n' +
         '• cache de cours\n\n' +
         'Cette action est irréversible (exportez avant si besoin).',

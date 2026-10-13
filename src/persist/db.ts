@@ -52,7 +52,7 @@ export async function setUiPrefs(prefs: UiPrefs): Promise<void> {
 }
 
 export async function ensureEnvelope(
-  type: 'PEA' | 'PEA_PME' | 'CTO' | 'CTO_SAXO',
+  type: import('@/domain/types').EnvelopeType,
 ): Promise<void> {
   const { updatePortfolio } = await import('./portfolioStore')
   const { envelopeTypeToKind } = await import('@/domain/flatAdapters')

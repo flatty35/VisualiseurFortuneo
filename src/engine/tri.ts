@@ -638,7 +638,14 @@ export function spansMoreThanOneMonth(
   return months >= 1
 }
 
-const ALL_ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO', 'CTO_SAXO']
+const ALL_ENVELOPES: EnvelopeType[] = [
+  'PEA',
+  'PEA_PME',
+  'CTO',
+  'PEA_SAXO',
+  'PEA_PME_SAXO',
+  'CTO_SAXO',
+]
 
 /**
  * Consolidated TRI across envelopes: every envelope's own synthetic buy /

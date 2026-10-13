@@ -30,6 +30,8 @@ export function envelopeTypeToKind(t: EnvelopeType): EnvelopeKindName {
   if (t === 'PEA_PME') return 'PEA_PME'
   if (t === 'CTO') return 'CTO'
   if (t === 'CTO_SAXO') return 'CTO_SAXO'
+  if (t === 'PEA_SAXO') return 'PEA_SAXO'
+  if (t === 'PEA_PME_SAXO') return 'PEA_PME_SAXO'
   return 'PEA'
 }
 

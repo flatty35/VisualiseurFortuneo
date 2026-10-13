@@ -118,7 +118,14 @@ export function portfolioFromV1(input: {
 
 /** @deprecated helper kept for tests */
 export function emptyPortfolioWithEnvelopes(
-  types: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO', 'CTO_SAXO'],
+  types: EnvelopeType[] = [
+    'PEA',
+    'PEA_PME',
+    'CTO',
+    'PEA_SAXO',
+    'PEA_PME_SAXO',
+    'CTO_SAXO',
+  ],
 ): Portfolio {
   const p = new Portfolio()
   for (const t of types) p.getOrCreateEnvelope(envelopeTypeToKind(t))
@@ -126,8 +133,10 @@ export function emptyPortfolioWithEnvelopes(
 }
 
 export function envelopeKindLabel(kind: number): string {
-  if (kind === EnvelopeKind.PEA_PME) return 'PEA-PME'
+  if (kind === EnvelopeKind.PEA_PME) return 'PEA-PME Fortuneo'
   if (kind === EnvelopeKind.CTO) return 'CTO Fortuneo'
   if (kind === EnvelopeKind.CTO_SAXO) return 'CTO Saxo'
-  return 'PEA'
+  if (kind === EnvelopeKind.PEA_SAXO) return 'PEA Saxo'
+  if (kind === EnvelopeKind.PEA_PME_SAXO) return 'PEA-PME Saxo'
+  return 'PEA Fortuneo'
 }

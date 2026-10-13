@@ -44,6 +44,16 @@ describe('saxo helpers', () => {
 })
 
 describe('parseSaxoWorkbook (live testData)', () => {
+  it('accepts PEA_SAXO envelope (same file format)', () => {
+    const buf = readFileSync(
+      'testData/saxo/Transactions_21044853_2026-01-01_2026-10-13.xlsx',
+    )
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+    const { operations } = parseSaxoWorkbook(ab as ArrayBuffer, 'PEA_SAXO')
+    expect(operations.length).toBeGreaterThan(40)
+    expect(operations.every((o) => o.envelope === 'PEA_SAXO')).toBe(true)
+  })
+
   it('imports trades, derives open positions, opening ≈ empty', () => {
     const buf = readFileSync(
       'testData/saxo/Transactions_21044853_2026-01-01_2026-10-13.xlsx',

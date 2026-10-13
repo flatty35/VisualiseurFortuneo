@@ -91,9 +91,17 @@ export function isSellTrade(type: OperationType): boolean {
   return SELL_TYPES.has(type)
 }
 
-/** Saxo CTO: full cash journal from account opening. */
+/** Saxo envelopes: full cash journal from account opening. */
 export function cashModeForEnvelope(
   envelope: string | undefined,
 ): CashImpactMode {
-  return envelope === 'CTO_SAXO' ? 'ledger' : 'titres'
+  return envelope === 'CTO_SAXO' ||
+    envelope === 'PEA_SAXO' ||
+    envelope === 'PEA_PME_SAXO'
+    ? 'ledger'
+    : 'titres'
+}
+
+export function isSaxoCashLedger(envelope: string | undefined): boolean {
+  return cashModeForEnvelope(envelope) === 'ledger'
 }

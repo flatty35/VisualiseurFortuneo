@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EnvelopeType, Operation, Support } from '@/domain/types'
-import { ALL_ENVELOPES } from '@/domain/envelopes'
+import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import { loadProjected } from '@/persist/portfolioStore'
 import {
   isValidIsin,
@@ -75,9 +75,15 @@ const emptySearch = <T,>(): SearchBoxState<T> => ({
 })
 
 type SupportRow = Support & {
+  /** Held in at least one envelope today. */
   held: boolean
+  /** Envelopes where the position is currently open. */
+  heldEnvelopes: EnvelopeType[]
+  /** Envelopes that ever touched this support (history). */
   envelopes: EnvelopeType[]
 }
+
+type EnvelopeFilter = EnvelopeType | 'ALL'
 
 export default function MappingsPage() {
   const { data, loading, reload } = useAsyncData(async () => {
@@ -88,7 +94,7 @@ export default function MappingsPage() {
       await loadProjected()
     supports.sort((a, b) => a.name.localeCompare(b.name, 'fr'))
 
-    const held = new Set<string>()
+    const heldByIsin = new Map<string, Set<EnvelopeType>>()
     const envelopesByIsin = new Map<string, Set<EnvelopeType>>()
 
     for (const env of ALL_ENVELOPES) {
@@ -103,7 +109,10 @@ export default function MappingsPage() {
       const last = series[series.length - 1]
       if (last) {
         for (const [isin, qty] of last.quantities) {
-          if (Math.abs(qty) > 1e-8) held.add(isin)
+          if (Math.abs(qty) <= 1e-8) continue
+          const set = heldByIsin.get(isin) ?? new Set()
+          set.add(env)
+          heldByIsin.set(isin, set)
         }
       }
       // Any isin seen in history for this envelope
@@ -124,11 +133,15 @@ export default function MappingsPage() {
     }
 
     const rows: SupportRow[] = supports
-      .map((s) => ({
-        ...s,
-        held: held.has(s.isin),
-        envelopes: [...(envelopesByIsin.get(s.isin) ?? [])],
-      }))
+      .map((s) => {
+        const heldEnvelopes = [...(heldByIsin.get(s.isin) ?? [])]
+        return {
+          ...s,
+          held: heldEnvelopes.length > 0,
+          heldEnvelopes,
+          envelopes: [...(envelopesByIsin.get(s.isin) ?? [])],
+        }
+      })
       .sort((a, b) => {
         if (a.held !== b.held) return a.held ? -1 : 1
         return a.name.localeCompare(b.name, 'fr')
@@ -136,6 +149,7 @@ export default function MappingsPage() {
 
     return { rows, operations }
   }, [])
+  const [envelopeFilter, setEnvelopeFilter] = useState<EnvelopeFilter>('ALL')
   const [edit, setEdit] = useState<Support | null>(null)
   /** Key in DB when the editor was opened (for rekey on save). */
   const [editOriginalIsin, setEditOriginalIsin] = useState<string | null>(null)
@@ -174,7 +188,28 @@ export default function MappingsPage() {
 
   const rows = data?.rows ?? []
   const allOperations = data?.operations ?? []
-  const allIsins = useMemo(() => rows.map((s) => s.isin), [rows])
+
+  /** Envelopes that actually have supports (for a compact filter list). */
+  const envelopesWithSupports = useMemo(() => {
+    const present = new Set<EnvelopeType>()
+    for (const r of rows) for (const e of r.envelopes) present.add(e)
+    return ALL_ENVELOPES.filter((e) => present.has(e))
+  }, [rows])
+
+  const visibleRows = useMemo(() => {
+    if (envelopeFilter === 'ALL') return rows
+    return rows.filter((r) => r.envelopes.includes(envelopeFilter))
+  }, [rows, envelopeFilter])
+
+  const visibleIsins = useMemo(
+    () => visibleRows.map((s) => s.isin),
+    [visibleRows],
+  )
+
+  const rowIsHeld = (s: SupportRow): boolean =>
+    envelopeFilter === 'ALL'
+      ? s.held
+      : s.heldEnvelopes.includes(envelopeFilter)
 
   /** Ops for the support being edited (original key + current key). */
   const editOps = useMemo(() => {
@@ -209,13 +244,15 @@ export default function MappingsPage() {
     return { last, lastBuy, lastSell, count: priced.length }
   }, [editOps])
 
-  // Drop selections that no longer exist after reload
+  // Drop selections that are outside the visible filter / no longer exist
   useEffect(() => {
     setSelected((prev) => {
-      const next = new Set([...prev].filter((isin) => allIsins.includes(isin)))
+      const next = new Set(
+        [...prev].filter((isin) => visibleIsins.includes(isin)),
+      )
       return next.size === prev.size ? prev : next
     })
-  }, [allIsins])
+  }, [visibleIsins])
 
   // When opening editor: scroll into view + focus; reset searches
   useEffect(() => {
@@ -373,7 +410,8 @@ export default function MappingsPage() {
     })
   }
 
-  const allSelected = rows.length > 0 && selected.size === rows.length
+  const allSelected =
+    visibleRows.length > 0 && selected.size === visibleRows.length
   const someSelected = selected.size > 0 && !allSelected
 
   const toggleOne = (isin: string) => {
@@ -387,10 +425,11 @@ export default function MappingsPage() {
 
   const toggleAll = () => {
     if (allSelected) setSelected(new Set())
-    else setSelected(new Set(allIsins))
+    else setSelected(new Set(visibleIsins))
   }
 
-  const selectedSupports = () => rows.filter((s) => selected.has(s.isin))
+  const selectedSupports = () =>
+    visibleRows.filter((s) => selected.has(s.isin))
 
   const runAutoMatchMissing = async () => {
     setMatching(true)
@@ -567,6 +606,30 @@ export default function MappingsPage() {
             alignItems: 'center',
           }}
         >
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: '0.9rem',
+            }}
+          >
+            <span className="muted">Enveloppe</span>
+            <select
+              value={envelopeFilter}
+              onChange={(e) =>
+                setEnvelopeFilter(e.target.value as EnvelopeFilter)
+              }
+              aria-label="Filtrer par enveloppe"
+            >
+              <option value="ALL">Tout le portefeuille</option>
+              {envelopesWithSupports.map((e) => (
+                <option key={e} value={e}>
+                  {envelopeLabel(e)}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             className="btn btn-primary"
@@ -592,6 +655,9 @@ export default function MappingsPage() {
             Reset sélection
           </button>
           <span className="muted" style={{ fontSize: '0.85rem' }}>
+            {visibleRows.length} support(s)
+            {envelopeFilter !== 'ALL' ? ` · ${envelopeLabel(envelopeFilter)}` : ''}
+            {' · '}
             {selected.size} sélectionné(s)
           </span>
         </div>
@@ -635,50 +701,73 @@ export default function MappingsPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((s) => (
-                <tr key={s.isin} style={s.held ? undefined : { opacity: 0.9 }}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(s.isin)}
-                      onChange={() => toggleOne(s.isin)}
-                      aria-label={`Sélectionner ${s.name}`}
-                    />
-                  </td>
-                  <td>{s.name}</td>
-                  <td>
-                    {s.held ? (
-                      <span className="badge">En portefeuille</span>
-                    ) : (
-                      <span className="badge warn">Sorti</span>
-                    )}
-                    {s.envelopes.length > 0 && (
-                      <span className="muted" style={{ marginLeft: 6, fontSize: '0.75rem' }}>
-                        {s.envelopes.join(', ')}
-                      </span>
-                    )}
-                  </td>
-                  <td>
-                    <code title={s.isin}>
-                      {isLocalSupportId(s.isin) ? s.isin.replace(/^LOCAL:/, 'loc:') : s.isin}
-                    </code>
-                  </td>
-                  <td>{s.yahooTicker || <span className="badge warn">—</span>}</td>
-                  <td>{s.googleTicker || '—'}</td>
-                  <td>{s.boursoramaTicker || '—'}</td>
-                  <td>{s.staticPrice ?? '—'}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => openEdit(s)}
-                    >
-                      Éditer
-                    </button>
+              {visibleRows.length === 0 && !loading && (
+                <tr>
+                  <td colSpan={9} className="muted" style={{ padding: '1rem 0.6rem' }}>
+                    {envelopeFilter === 'ALL'
+                      ? 'Aucun support — importez un historique.'
+                      : `Aucun support pour ${envelopeLabel(envelopeFilter)}.`}
                   </td>
                 </tr>
-              ))}
-            </tbody>          </table>
+              )}
+              {visibleRows.map((s) => {
+                const heldHere = rowIsHeld(s)
+                return (
+                  <tr
+                    key={s.isin}
+                    style={heldHere ? undefined : { opacity: 0.9 }}
+                  >
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(s.isin)}
+                        onChange={() => toggleOne(s.isin)}
+                        aria-label={`Sélectionner ${s.name}`}
+                      />
+                    </td>
+                    <td>{s.name}</td>
+                    <td>
+                      {heldHere ? (
+                        <span className="badge">En portefeuille</span>
+                      ) : (
+                        <span className="badge warn">Sorti</span>
+                      )}
+                      {s.envelopes.length > 0 && (
+                        <span
+                          className="muted"
+                          style={{ marginLeft: 6, fontSize: '0.75rem' }}
+                        >
+                          {s.envelopes.map(envelopeLabel).join(' · ')}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <code title={s.isin}>
+                        {isLocalSupportId(s.isin)
+                          ? s.isin.replace(/^LOCAL:/, 'loc:')
+                          : s.isin}
+                      </code>
+                    </td>
+                    <td>
+                      {s.yahooTicker || <span className="badge warn">—</span>}
+                    </td>
+                    <td>{s.googleTicker || '—'}</td>
+                    <td>{s.boursoramaTicker || '—'}</td>
+                    <td>{s.staticPrice ?? '—'}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => openEdit(s)}
+                      >
+                        Éditer
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
 

@@ -1,7 +1,13 @@
 import type { PortfolioData } from './portfolioModel'
 
 /** Envelope types supported in v1 */
-export type EnvelopeType = 'PEA' | 'PEA_PME' | 'CTO' | 'CTO_SAXO'
+export type EnvelopeType =
+  | 'PEA'
+  | 'PEA_PME'
+  | 'CTO'
+  | 'PEA_SAXO'
+  | 'PEA_PME_SAXO'
+  | 'CTO_SAXO'
 
 export type OperationType =
   | 'ACHAT'

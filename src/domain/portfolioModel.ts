@@ -68,17 +68,25 @@ export const OperationType = {
 } as const
 export type OperationTypeId = (typeof OperationType)[keyof typeof OperationType]
 
-/** Envelope category (broker × wrapper). */
+/** Envelope category (broker × wrapper). Numeric ids are stable in persisted JSON. */
 export const EnvelopeKind = {
   PEA: 0,
   PEA_PME: 1,
   CTO: 2,
   CTO_SAXO: 3,
-  END: 4,
+  PEA_SAXO: 4,
+  PEA_PME_SAXO: 5,
+  END: 6,
 } as const
 export type EnvelopeKindId = (typeof EnvelopeKind)[keyof typeof EnvelopeKind]
 
-export type EnvelopeKindName = 'PEA' | 'PEA_PME' | 'CTO' | 'CTO_SAXO'
+export type EnvelopeKindName =
+  | 'PEA'
+  | 'PEA_PME'
+  | 'CTO'
+  | 'CTO_SAXO'
+  | 'PEA_SAXO'
+  | 'PEA_PME_SAXO'
 
 export function envelopeKindFromName(name: EnvelopeKindName): EnvelopeKindId {
   return EnvelopeKind[name]
@@ -88,6 +96,8 @@ export function envelopeKindToName(kind: number): EnvelopeKindName {
   if (kind === EnvelopeKind.PEA_PME) return 'PEA_PME'
   if (kind === EnvelopeKind.CTO) return 'CTO'
   if (kind === EnvelopeKind.CTO_SAXO) return 'CTO_SAXO'
+  if (kind === EnvelopeKind.PEA_SAXO) return 'PEA_SAXO'
+  if (kind === EnvelopeKind.PEA_PME_SAXO) return 'PEA_PME_SAXO'
   return 'PEA'
 }
 
@@ -514,9 +524,11 @@ export class Portfolio {
     let env = this.envelopes.find((e) => e.envelopeType === type)
     if (!env) {
       const labels: Record<EnvelopeKindName, string> = {
-        PEA: 'PEA',
-        PEA_PME: 'PEA-PME',
+        PEA: 'PEA Fortuneo',
+        PEA_PME: 'PEA-PME Fortuneo',
         CTO: 'CTO Fortuneo',
+        PEA_SAXO: 'PEA Saxo',
+        PEA_PME_SAXO: 'PEA-PME Saxo',
         CTO_SAXO: 'CTO Saxo',
       }
       env = new Envelope({

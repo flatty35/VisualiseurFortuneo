@@ -302,8 +302,9 @@ export default function ImportPage() {
               accept=".xlsx,.xls"
             />
             <p className="muted" style={{ margin: 0, alignSelf: 'center' }}>
-              Export « Transactions » (feuilles Transactions + Opérations). Les
-              positions ouvertes sont recalculées depuis l’historique.
+              Export « Transactions » (feuilles Transactions + Opérations) —
+              même format pour PEA, PEA-PME et CTO. Les positions ouvertes sont
+              recalculées depuis l’historique.
             </p>
           </div>
         )}
