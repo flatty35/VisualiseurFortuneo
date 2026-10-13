@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import type { EnvelopeType } from '@/domain/types'
+import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import { clearAllData } from '@/persist/db'
 import { loadProjected } from '@/persist/portfolioStore'
 import { buildHoldingsSeries } from '@/engine/positions'
@@ -10,7 +10,7 @@ import { getAllQuoteMaps } from '@/quotes/localQuoteCache'
 import { isProxyConfigured } from '@/quotes/gasClient'
 import { useAsyncData } from '@/ui/hooks/useLiveQuery'
 
-const ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO']
+const ENVELOPES = ALL_ENVELOPES
 
 function fmtEur(n: number): string {
   return n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
@@ -82,7 +82,7 @@ export default function DashboardPage() {
     const ok = confirm(
       'Réinitialiser tout le visualiseur ?\n\n' +
         'Cela efface définitivement dans ce navigateur :\n' +
-        '• opérations et positions (PEA / PEA-PME / CTO)\n' +
+        '• opérations et positions (PEA / PEA-PME / CTO Fortuneo / CTO Saxo)\n' +
         '• correspondances ISIN / tickers\n' +
         '• cache de cours\n\n' +
         'Cette action est irréversible (exportez avant si besoin).',
@@ -106,16 +106,16 @@ export default function DashboardPage() {
   return (
     <div>
       <section className="panel" style={{ marginBottom: '1rem' }}>
-        <h1 className="display" style={{ margin: '0 0 0.35rem', fontSize: '2.2rem' }}>
+        <h1 className="display" style={{ margin: '0 0 0.35rem' }}>
           Portefeuille local
         </h1>
         <p className="muted" style={{ margin: 0, maxWidth: 640 }}>
           Vos opérations et quantités restent dans ce navigateur. Seuls des tickers publics
-          transitent éventuelllement vers le proxy de cours.
+          transitent éventuellement vers le proxy de cours.
         </p>
         <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <Link className="btn btn-primary" to="/import">
-            Importer Fortuneo
+            Importer
           </Link>
           <Link className="btn" to="/charts">
             Voir les graphiques
@@ -145,7 +145,7 @@ export default function DashboardPage() {
         {data?.cards.map((c) =>
           c.empty ? (
             <div key={c.type} className="kpi-card">
-              <div className="label">{c.type.replace('_', '-')}</div>
+              <div className="label">{envelopeLabel(c.type)}</div>
               <div className="value" style={{ fontSize: '1.2rem', color: 'var(--ink-muted)' }}>
                 Non importé
               </div>

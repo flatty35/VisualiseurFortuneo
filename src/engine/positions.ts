@@ -1,5 +1,9 @@
 import { quantityDelta } from '@/domain/classify'
-import { cashImpact } from '@/engine/cashImpact'
+import {
+  cashImpact,
+  cashModeForEnvelope,
+  type CashImpactMode,
+} from '@/engine/cashImpact'
 import { eachBusinessDay, toBusinessDay } from '@/engine/businessDays'
 import type { EnvelopeType, Operation, VirtualOpening } from '@/domain/types'
 
@@ -18,11 +22,15 @@ export function buildHoldingsSeries(input: {
   virtualOpening?: VirtualOpening | null
   from?: string
   to?: string
+  /** Override auto envelope cash mode (Saxo = full ledger). */
+  cashMode?: CashImpactMode
 }): HoldingsSnapshot[] {
   const ops = input.operations
     .filter((o) => o.envelope === input.envelope)
     .sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
 
+  const cashMode =
+    input.cashMode ?? cashModeForEnvelope(input.envelope)
   const vo = input.virtualOpening
   const startDate =
     input.from ??
@@ -34,7 +42,8 @@ export function buildHoldingsSeries(input: {
   const qty = new Map<string, number>()
   let cash = 0
 
-  if (vo && vo.envelope === input.envelope) {
+  // Saxo ledger: ignore VO seed cash/positions — full history is in the file.
+  if (vo && vo.envelope === input.envelope && cashMode !== 'ledger') {
     cash = vo.cash
     for (const p of vo.positions) {
       qty.set(p.isin, p.quantity)
@@ -44,8 +53,18 @@ export function buildHoldingsSeries(input: {
   // Apply seed ops that fall on start if no VO provided
   const byDate = new Map<string, Operation[]>()
   for (const op of ops) {
-    // Skip POSITION_SEED qty/cash if VO already applied
-    if (vo && op.synthetic && op.type === 'POSITION_SEED') continue
+    // Skip POSITION_SEED qty/cash if VO already applied (Fortuneo titres path)
+    if (
+      cashMode !== 'ledger' &&
+      vo &&
+      op.synthetic &&
+      op.type === 'POSITION_SEED'
+    ) {
+      continue
+    }
+    if (cashMode === 'ledger' && op.synthetic && op.type === 'POSITION_SEED') {
+      continue
+    }
     // Weekend / holiday settlement → next weekday so cash & qty are not dropped
     const day = toBusinessDay(op.date)
     const list = byDate.get(day) ?? []
@@ -59,7 +78,7 @@ export function buildHoldingsSeries(input: {
       const rank = (o: Operation) =>
         o.type === 'VERSEMENT' || o.type === 'RETRAIT'
           ? 0
-          : o.type === 'DIVIDENDE'
+          : o.type === 'DIVIDENDE' || o.type === 'FRAIS'
             ? 1
             : 2
       return rank(a) - rank(b) || a.id.localeCompare(b.id)
@@ -73,7 +92,7 @@ export function buildHoldingsSeries(input: {
         qty.set(op.isin, op.quantity)
         continue
       }
-      cash += cashImpact(op)
+      cash += cashImpact(op, cashMode)
       if (op.isin && op.quantity !== undefined) {
         const delta = quantityDelta(op.type, op.quantity)
         qty.set(op.isin, (qty.get(op.isin) ?? 0) + delta)

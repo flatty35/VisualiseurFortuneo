@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChartPeriod, EnvelopeType, VirtualOpening } from '@/domain/types'
+import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import {
   loadEnvelopeProjected,
   loadProjected,
 } from '@/persist/portfolioStore'
+import { cashModeForEnvelope } from '@/engine/cashImpact'
+import { THEME } from '@/ui/theme'
 import { buildHoldingsSeries, type HoldingsSnapshot } from '@/engine/positions'
 import { buildOperationMarkers } from '@/engine/markers'
 import {
@@ -41,10 +44,18 @@ import PortfolioChart, {
 
 type ChartsTab = 'historique' | 'valorisation'
 type ChartScope = EnvelopeType | 'ALL'
-const ALL_ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO']
 
 function fmtEur(n: number): string {
-  return n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+  return fmtMoney(n, 'EUR')
+}
+
+function fmtMoney(n: number, currency = 'EUR'): string {
+  const c = (currency || 'EUR').toUpperCase()
+  try {
+    return n.toLocaleString('fr-FR', { style: 'currency', currency: c })
+  } catch {
+    return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 2 })} ${c}`
+  }
 }
 
 function mergeHoldingsSnapshots(
@@ -208,11 +219,14 @@ export default function ChartsPage() {
           operations: data.operations,
           virtualOpening: vo,
         })
-        // Idle cash today only on the last snapshot (not projected backward)
-        const reported = vo?.reportedCash ?? 0
-        if (series.length && Math.abs(reported) > 1e-9) {
-          const last = series[series.length - 1]
-          series[series.length - 1] = { ...last, cash: reported }
+        // Fortuneo titres-only: idle cash today only on the last snapshot.
+        // Saxo ledger: cash is replayed from the full journal — do not overwrite.
+        if (cashModeForEnvelope(env) !== 'ledger') {
+          const reported = vo?.reportedCash ?? 0
+          if (series.length && Math.abs(reported) > 1e-9) {
+            const last = series[series.length - 1]
+            series[series.length - 1] = { ...last, cash: reported }
+          }
         }
         return series
       })
@@ -291,7 +305,7 @@ export default function ChartsPage() {
           ),
           yAxisIndex: 1,
           valueUnit: 'pct',
-          color: '#6eb5ff',
+          color: THEME.tri,
           dashed: true,
           showInLegend: true,
           // Densified polyline for tooltip; symbols only on month-end knots
@@ -325,6 +339,7 @@ export default function ChartsPage() {
           isPosition: true,
           connectGroup: isin,
           showInLegend: true,
+          currency: s?.quoteCurrency || 'EUR',
         })
       }
 
@@ -350,10 +365,15 @@ export default function ChartsPage() {
         holdings,
         from: fullFrom,
         to: fullTo,
-      }).map((s) => ({
-        ...s,
-        isPosition: true,
-      }))
+      }).map((s) => {
+        const isin = s.connectGroup || s.id.replace(/-seg\d+$/, '')
+        const support = data.supports.find((x) => x.isin === isin)
+        return {
+          ...s,
+          isPosition: true,
+          currency: support?.quoteCurrency || 'EUR',
+        }
+      })
 
       // Single selection: PRU step (same % scale) + monthly TRI on 2nd axis.
       if (selectedIsins.length === 1) {
@@ -404,7 +424,7 @@ export default function ChartsPage() {
             ),
             yAxisIndex: 1,
             valueUnit: 'pct',
-            color: '#6eb5ff',
+            color: THEME.tri,
             dashed: true,
             showInLegend: true,
             connectNulls: true,
@@ -535,6 +555,8 @@ export default function ChartsPage() {
         valued,
         holdingsSliced: holdings,
         names,
+        supports: data.supports,
+        operations: data.operations,
       }
     } catch (e) {
       console.error('Charts model', e)
@@ -606,17 +628,37 @@ export default function ChartsPage() {
         if (Math.abs(qty) <= 1e-8 && Math.abs(value) <= 1e-8) return null
         const price =
           Math.abs(qty) > 1e-12 ? value / qty : undefined
+        const currency =
+          model.supports.find((s) => s.isin === isin)?.quoteCurrency || 'EUR'
+        const fxOp = [...model.operations]
+          .filter(
+            (o) =>
+              o.isin === isin &&
+              o.date <= target &&
+              o.fxRate !== undefined &&
+              o.fxRate > 0,
+          )
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .at(-1)
+        const valueEur =
+          !currency || currency.toUpperCase() === 'EUR'
+            ? value
+            : fxOp?.fxRate
+              ? value * fxOp.fxRate
+              : value
         return {
           isin,
           name: model.names[isin] ?? isin,
           qty,
           price,
           value,
-          weight: v.total > 0 ? value / v.total : 0,
+          valueEur,
+          currency,
+          weight: v.total > 0 ? valueEur / v.total : 0,
         }
       })
       .filter((r): r is NonNullable<typeof r> => r != null)
-      .sort((a, b) => b.value - a.value)
+      .sort((a, b) => b.valueEur - a.valueEur)
 
     return {
       date: target,
@@ -720,9 +762,11 @@ export default function ChartsPage() {
               aria-label="Enveloppe"
             >
               <option value="ALL">Toutes</option>
-              <option value="PEA">PEA</option>
-              <option value="PEA_PME">PEA-PME</option>
-              <option value="CTO">CTO</option>
+              {ALL_ENVELOPES.map((e) => (
+                <option key={e} value={e}>
+                  {envelopeLabel(e)}
+                </option>
+              ))}
             </select>
             <div className="pill-row">
               {(['1M', '3M', '1Y', '2Y'] as ChartPeriod[]).map((p) => (
@@ -929,9 +973,13 @@ export default function ChartsPage() {
                                   })}
                                 </td>
                                 <td className="num">
-                                  {r.price !== undefined ? fmtEur(r.price) : '—'}
+                                  {r.price !== undefined
+                                    ? fmtMoney(r.price, r.currency)
+                                    : '—'}
                                 </td>
-                                <td className="num">{fmtEur(r.value)}</td>
+                                <td className="num">
+                                  {fmtMoney(r.value, r.currency)}
+                                </td>
                                 <td className="num">
                                   {(r.weight * 100).toLocaleString('fr-FR', {
                                     maximumFractionDigits: 1,

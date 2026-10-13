@@ -1,4 +1,4 @@
-# Visualiseur Fortuneo
+# Visualiseur PEA & CTO — Fortuneo · Saxo
 
 Application web **100 % client** pour consulter l’évolution d’un portefeuille PEA / PEA-PME / CTO à partir des exports Fortuneo.
 

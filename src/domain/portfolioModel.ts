@@ -68,16 +68,17 @@ export const OperationType = {
 } as const
 export type OperationTypeId = (typeof OperationType)[keyof typeof OperationType]
 
-/** Envelope category used by the Fortuneo viewer */
+/** Envelope category (broker × wrapper). */
 export const EnvelopeKind = {
   PEA: 0,
   PEA_PME: 1,
   CTO: 2,
-  END: 3,
+  CTO_SAXO: 3,
+  END: 4,
 } as const
 export type EnvelopeKindId = (typeof EnvelopeKind)[keyof typeof EnvelopeKind]
 
-export type EnvelopeKindName = 'PEA' | 'PEA_PME' | 'CTO'
+export type EnvelopeKindName = 'PEA' | 'PEA_PME' | 'CTO' | 'CTO_SAXO'
 
 export function envelopeKindFromName(name: EnvelopeKindName): EnvelopeKindId {
   return EnvelopeKind[name]
@@ -86,6 +87,7 @@ export function envelopeKindFromName(name: EnvelopeKindName): EnvelopeKindId {
 export function envelopeKindToName(kind: number): EnvelopeKindName {
   if (kind === EnvelopeKind.PEA_PME) return 'PEA_PME'
   if (kind === EnvelopeKind.CTO) return 'CTO'
+  if (kind === EnvelopeKind.CTO_SAXO) return 'CTO_SAXO'
   return 'PEA'
 }
 
@@ -277,6 +279,8 @@ export interface SupportData {
   lastKnownValue?: [number, number]
   /** Local synthetic key when Fortuneo had no ISIN */
   localKey?: string
+  /** Instrument / quote currency (USD, EUR, …) */
+  quoteCurrency?: string
 }
 
 export class Support {
@@ -296,6 +300,7 @@ export class Support {
   customStaticInformation: string
   lastKnownValue: [number, number]
   localKey: string
+  quoteCurrency: string
 
   constructor(data: SupportData = {}) {
     this.uniqueID = data.uniqueID || 0
@@ -316,6 +321,7 @@ export class Support {
     this.customStaticInformation = data.customStaticInformation || ''
     this.lastKnownValue = data.lastKnownValue || [0, 0]
     this.localKey = data.localKey || ''
+    this.quoteCurrency = data.quoteCurrency || ''
   }
 
   /** Primary display / join key: real ISIN, else LOCAL:…, else id */
@@ -343,6 +349,7 @@ export class Support {
       customStaticInformation: this.customStaticInformation,
       lastKnownValue: this.lastKnownValue,
       localKey: this.localKey,
+      quoteCurrency: this.quoteCurrency || undefined,
     }
   }
 }
@@ -509,7 +516,8 @@ export class Portfolio {
       const labels: Record<EnvelopeKindName, string> = {
         PEA: 'PEA',
         PEA_PME: 'PEA-PME',
-        CTO: 'CTO',
+        CTO: 'CTO Fortuneo',
+        CTO_SAXO: 'CTO Saxo',
       }
       env = new Envelope({
         envelopeType: type,

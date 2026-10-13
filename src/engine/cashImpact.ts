@@ -8,6 +8,14 @@ const BUY_TYPES = new Set<OperationType>([
 
 const SELL_TYPES = new Set<OperationType>(['VENTE', 'RACHAT'])
 
+const CASH_LEDGER_TYPES = new Set<OperationType>([
+  'VERSEMENT',
+  'RETRAIT',
+  'FRAIS',
+  'TAXE',
+  'DIVIDENDE',
+])
+
 /**
  * Signed trade cash (Montant net), buy &lt; 0, sell &gt; 0.
  * Used for TRI apports/retraits — not for the cash pocket balance.
@@ -36,19 +44,43 @@ export function tradeCashAmount(op: Operation): number {
   return 0
 }
 
+export type CashImpactMode = 'titres' | 'ledger'
+
 /**
  * Cash pocket delta for holdings replay.
  *
- * Titres-only model: trades do **not** accumulate a cash balance.
- * Money is treated as an external apport the day of an achat (TRI),
- * then spent immediately — EOD cash stays 0 historically.
+ * - `titres` (Fortuneo default): trades do **not** accumulate a cash balance.
+ *   Money is an external apport the day of an achat (TRI), then spent immediately.
+ *   EOD cash stays 0 historically; idle cash is shown only via reportedCash.
+ * - `ledger` (Saxo full history): every booked amount moves the cash line,
+ *   including trades, dividendes, intérêts and coûts de portage.
  */
-export function cashImpact(_op: Operation): number {
+export function cashImpact(
+  op: Operation,
+  mode: CashImpactMode = 'titres',
+): number {
+  if (op.synthetic) return 0
+  if (mode !== 'ledger') return 0
+
+  if (CASH_LEDGER_TYPES.has(op.type)) {
+    return op.netAmount !== undefined && Number.isFinite(op.netAmount)
+      ? op.netAmount
+      : 0
+  }
+
+  if (BUY_TYPES.has(op.type) || SELL_TYPES.has(op.type)) {
+    return tradeCashAmount(op)
+  }
+
   return 0
 }
 
 export function affectsCash(type: OperationType): boolean {
-  return BUY_TYPES.has(type) || SELL_TYPES.has(type)
+  return (
+    BUY_TYPES.has(type) ||
+    SELL_TYPES.has(type) ||
+    CASH_LEDGER_TYPES.has(type)
+  )
 }
 
 export function isBuyTrade(type: OperationType): boolean {
@@ -57,4 +89,11 @@ export function isBuyTrade(type: OperationType): boolean {
 
 export function isSellTrade(type: OperationType): boolean {
   return SELL_TYPES.has(type)
+}
+
+/** Saxo CTO: full cash journal from account opening. */
+export function cashModeForEnvelope(
+  envelope: string | undefined,
+): CashImpactMode {
+  return envelope === 'CTO_SAXO' ? 'ledger' : 'titres'
 }

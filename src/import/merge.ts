@@ -3,6 +3,7 @@ import type {
   ImportReport,
   Operation,
   ParsedPosition,
+  VirtualOpening,
 } from '@/domain/types'
 import { AssetType } from '@/domain/portfolioModel'
 import {
@@ -18,12 +19,17 @@ import { extractCashFromPositions } from './positionsXls'
 import { assignSupportKeys, buildNameToIsin } from './resolveIsin'
 import { applySeedMatches } from '@/quotes/tickerMatch'
 import { ensureHistoricalSupports } from './ensureHistoricalSupports'
+import { seedTradePricesFromOperations } from './seedTradePrices'
 
 export async function mergeImport(input: {
   envelope: EnvelopeType
   titresOps: Operation[]
   positions: ParsedPosition[]
   currentCash?: number
+  /** Saxo: skip VO reconstruction — full history from account opening. */
+  skipVirtualOpening?: boolean
+  /** ISIN → quote currency (USD, …) from broker file. */
+  currencyHints?: Record<string, string>
 }): Promise<ImportReport> {
   const { envelope, positions } = input
   const warnings: string[] = []
@@ -53,10 +59,9 @@ export async function mergeImport(input: {
   const portfolio = await loadPortfolio()
   const env = portfolio.getOrCreateEnvelope(envelopeTypeToKind(envelope))
 
-  // Drop synthetic seeds + legacy espèces ledger (supportUniqueID === 0)
-  env.operations = env.operations.filter(
-    (o) => !o.synthetic && o.supportUniqueID > 0,
-  )
+  // Drop synthetic seeds; keep real cash-ledger ops (supportUniqueID === 0)
+  // such as Saxo versements / intérêts / portage / dividendes cash.
+  env.operations = env.operations.filter((o) => !o.synthetic)
 
   const existingFp = new Set(env.operations.map((o) => o.fingerprint))
   const fresh = titresOps.filter((o) => !existingFp.has(o.fingerprint))
@@ -90,11 +95,17 @@ export async function mergeImport(input: {
     const isLocal = p.isin.startsWith('LOCAL:')
     const importPrice = p.price ?? p.pru
     const existing = portfolio.findSupportByKey(p.isin)
+    const quoteCurrency =
+      p.currency?.toUpperCase() ||
+      input.currencyHints?.[p.isin]?.toUpperCase() ||
+      existing?.quoteCurrency ||
+      undefined
     portfolio.upsertSupport({
       niceUniqueName: p.name,
       ISIN: isLocal ? '' : p.isin,
       localKey: isLocal ? p.isin : '',
       assetType: AssetType.ACTIONS,
+      ...(quoteCurrency ? { quoteCurrency } : {}),
       ...(importPrice !== undefined
         ? {
             lastKnownValue: [0, importPrice] as [number, number],
@@ -109,12 +120,24 @@ export async function mergeImport(input: {
   }
   for (const o of allOps) {
     if (!o.isin) continue
+    const quoteCurrency =
+      o.instrumentCurrency?.toUpperCase() ||
+      input.currencyHints?.[o.isin]?.toUpperCase()
     portfolio.upsertSupport({
       niceUniqueName: o.name ?? o.isin,
       ISIN: o.isin.startsWith('LOCAL:') ? '' : o.isin,
       localKey: o.isin.startsWith('LOCAL:') ? o.isin : '',
       assetType: AssetType.ACTIONS,
+      ...(quoteCurrency ? { quoteCurrency } : {}),
     })
+  }
+
+  // Trade prices → dated static quotes (Yahoo still preferred when believable)
+  const seededBars = seedTradePricesFromOperations(portfolio, allOps)
+  if (seededBars > 0) {
+    warnings.push(
+      `${seededBars} cotation(s) issues des prix d’opération (secours turbos / absents Yahoo).`,
+    )
   }
   supportsCreated = Math.max(
     0,
@@ -177,18 +200,44 @@ export async function mergeImport(input: {
   }
 
   portfolio2 = await loadPortfolio()
-  const opsForReconstruct = projectPortfolio(portfolio2).operations.filter(
-    (o) => o.envelope === envelope && !o.synthetic && !!o.isin,
-  )
 
-  const virtualOpening = reconstructVirtualOpening({
-    envelope,
-    positions,
-    operations: opsForReconstruct,
-    currentCash,
-  })
+  let virtualOpening: VirtualOpening | null = null
 
-  applyVirtualOpeningSeeds(portfolio2, virtualOpening)
+  if (input.skipVirtualOpening) {
+    // Saxo: full journal from account opening — cash line is replayed from ops.
+    const env = portfolio2.getOrCreateEnvelope(envelopeTypeToKind(envelope))
+    env.customState.currentCash = currentCash
+    env.customState.virtualOpeningCash = 0
+    env.customState.virtualOpeningDate =
+      allOps.map((o) => o.date).sort()[0] ?? new Date().toISOString().slice(0, 10)
+    // Drop prior synthetic seeds (Fortuneo-style VO) — Saxo replays from ops
+    env.operations = env.operations.filter((o) => !o.synthetic)
+    virtualOpening = {
+      envelope,
+      date: env.customState.virtualOpeningDate as string,
+      cash: 0,
+      reportedCash: currentCash,
+      positions: [],
+      computedAt: new Date().toISOString(),
+    }
+    warnings.push(
+      'Saxo : pas d’ouverture virtuelle — historique complet + ligne espèces rejouée.',
+    )
+  } else {
+    const opsForReconstruct = projectPortfolio(portfolio2).operations.filter(
+      (o) => o.envelope === envelope && !o.synthetic && !!o.isin,
+    )
+
+    virtualOpening = reconstructVirtualOpening({
+      envelope,
+      positions,
+      operations: opsForReconstruct,
+      currentCash,
+    })
+
+    applyVirtualOpeningSeeds(portfolio2, virtualOpening)
+  }
+
   await savePortfolio(portfolio2)
   await ensureEnvelope(envelope)
 

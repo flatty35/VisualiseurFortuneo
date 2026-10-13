@@ -24,7 +24,8 @@ export default function App() {
     <div className="app-shell">
       <header className="nav">
         <div className="brand">
-          Visualiseur <span>Fortuneo</span>
+          <img src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" />
+          Visualiseur PEA &amp; CTO <span>Fortuneo · Saxo</span>
         </div>
         <nav className="nav-links">
           {links.map((l) => (

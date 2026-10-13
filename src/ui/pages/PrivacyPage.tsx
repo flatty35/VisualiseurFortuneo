@@ -4,13 +4,13 @@ export default function PrivacyPage() {
       <section className="panel">
         <h1 style={{ marginTop: 0 }}>Confidentialité</h1>
         <p>
-          <strong>Visualiseur Fortuneo</strong> est une application <em>local-first</em> :
+          <strong>Visualiseur PEA &amp; CTO — Fortuneo · Saxo</strong> est une application <em>local-first</em> :
           vos données de portefeuille (quantités, opérations, valorisations, cash) restent
           exclusivement dans le stockage de ce navigateur (IndexedDB).
         </p>
         <h2>Ce qui ne quitte jamais votre machine</h2>
         <ul className="muted">
-          <li>Fichiers CSV / XLS Fortuneo et leur contenu</li>
+          <li>Fichiers CSV / XLS Fortuneo ou XLSX Saxo et leur contenu</li>
           <li>Quantités, PRU, montants, opérations</li>
           <li>Exports JSON de sauvegarde (téléchargement local uniquement)</li>
         </ul>

@@ -343,4 +343,59 @@ describe('computePortfolioTri', () => {
     expect(sum.retraits).toBeCloseTo(100)
     expect(sum.net).toBeCloseTo(300)
   })
+
+  it('Saxo ledger: only versements / retraits are external flows', () => {
+    const ops: Operation[] = [
+      op({
+        id: 'd1',
+        envelope: 'CTO_SAXO',
+        type: 'VERSEMENT',
+        date: '2024-01-03',
+        netAmount: 1000,
+        label: 'Dépôts',
+      }),
+      op({
+        id: 'a1',
+        envelope: 'CTO_SAXO',
+        type: 'ACHAT',
+        date: '2024-01-04',
+        isin: 'FR0000125486',
+        quantity: 10,
+        price: 100,
+        netAmount: -1000,
+        label: 'Acheter 10 @ 100',
+      }),
+      op({
+        id: 'f1',
+        envelope: 'CTO_SAXO',
+        type: 'FRAIS',
+        date: '2024-02-01',
+        netAmount: -1,
+        label: 'Intérêts client',
+      }),
+    ]
+    const sum = sumEnvelopeExternalFlows({
+      operations: ops,
+      envelope: 'CTO_SAXO',
+      from: '2024-01-01',
+      to: '2024-12-31',
+    })
+    expect(sum.count).toBe(1)
+    expect(sum.apports).toBeCloseTo(1000)
+
+    // Flat price, cash fully invested: buy is internal, the 1 € fee is a loss
+    const tri = computePortfolioTri({
+      envelope: 'CTO_SAXO',
+      operations: ops,
+      supports: [
+        { isin: 'FR0000125486', name: 'VINCI', manualPrices: [{ date: '2024-01-04', price: 100 }] },
+      ],
+      quotes: new Map(),
+      t0: '2024-01-02',
+      t1: '2024-12-31',
+    })
+    expect(tri.endValue).toBeCloseTo(999)
+    expect(tri.irr!).toBeLessThan(0)
+    expect(tri.irr!).toBeGreaterThan(-0.01)
+  })
 })

@@ -7,6 +7,10 @@ import {
   formatMarkerTooltip,
   type OperationMarker,
 } from '@/engine/markers'
+import { SERIES_PALETTE, THEME } from '@/ui/theme'
+
+const LINE = (alpha: number) => `rgba(${THEME.lineRgb}, ${alpha})`
+const ACCENT = (alpha: number) => `rgba(${THEME.accentRgb}, ${alpha})`
 
 /** ECharts native dataZoom sync between Cours / Valorisation charts. */
 const ZOOM_SYNC_GROUP = 'vf-charts-zoom-sync'
@@ -31,6 +35,8 @@ export interface ChartSeries {
   yAxisIndex?: 0 | 1
   /** How to format tooltip / axis values */
   valueUnit?: 'eur' | 'pct' | 'index'
+  /** ISO currency for money tooltips (USD positions stay in USD). */
+  currency?: string
   /** Join across null gaps (monthly TRI on a daily axis). */
   connectNulls?: boolean
   /** Show markers on each sample (useful for sparse series). */
@@ -518,8 +524,14 @@ function buildOption(
       .map((s) => s.connectGroup || s.id),
   )
 
-  const formatEur = (n: number) =>
-    n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+  const formatMoney = (n: number, currency = 'EUR') => {
+    const c = (currency || 'EUR').toUpperCase()
+    try {
+      return n.toLocaleString('fr-FR', { style: 'currency', currency: c })
+    } catch {
+      return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 2 })} ${c}`
+    }
+  }
 
   const formatTooltipSeries = (seriesName: string, date: string, raw: unknown) => {
     const rawY = Array.isArray(raw) ? raw[1] : raw
@@ -530,6 +542,7 @@ function buildOption(
         s.name === seriesName &&
         s.dates.some((d) => calendarDay(d) === day),
     )
+    const cur = match?.currency || 'EUR'
     const idx =
       match?.dates.findIndex((d) => calendarDay(d) === day) ?? -1
     const price =
@@ -552,25 +565,25 @@ function buildOption(
     if (mode === 'index' && (price !== undefined || valo !== undefined)) {
       const primary =
         valo !== undefined && valo > 0
-          ? formatEur(valo)
+          ? formatMoney(valo, cur)
           : price !== undefined
-            ? formatEur(price)
+            ? formatMoney(price, cur)
             : '—'
       const secondary = Number.isFinite(chartVal)
         ? ` · ${formatSignedPct(chartVal)}`
         : ''
       const priceHint =
         valo !== undefined && valo > 0 && price !== undefined
-          ? ` <span style="color:#9bb5a8;font-size:11px">(${formatEur(price)})</span>`
+          ? ` <span style="color:${THEME.muted};font-size:11px">(${formatMoney(price, cur)})</span>`
           : ''
-      return `${primary}${priceHint}<span style="color:#9bb5a8;font-size:11px">${secondary}</span>`
+      return `${primary}${priceHint}<span style="color:${THEME.muted};font-size:11px">${secondary}</span>`
     }
 
     if (!Number.isFinite(chartVal)) return '—'
     if (match?.valueUnit === 'pct' || mode === 'index') {
       return formatSignedPct(chartVal)
     }
-    return formatEur(chartVal)
+    return formatMoney(chartVal, cur)
   }
 
   /** Same HTML box for axis day hover and markPoint (triangle/square) hover. */
@@ -581,7 +594,7 @@ function buildOption(
     const date = calendarDay(String(dateRaw || '').replace('·abo', ''))
     if (!date) return ''
     const lines: string[] = [
-      `<div style="font-weight:600;margin-bottom:6px;color:#c4a35a">${date}</div>`,
+      `<div style="font-weight:600;margin-bottom:6px;color:${THEME.ink};font-variant-numeric:tabular-nums">${date}</div>`,
     ]
 
     const seen = new Set<string>()
@@ -608,7 +621,7 @@ function buildOption(
         seen.add(s.name)
         lines.push(
           `<div style="display:flex;gap:8px;align-items:baseline;margin:2px 0">` +
-            `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${s.color || '#7dcea0'}"></span>` +
+            `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${s.color || THEME.accent}"></span>` +
             `<span style="flex:1">${escapeHtml(s.name)}</span>` +
             `<span style="font-variant-numeric:tabular-nums;text-align:right">${formatTooltipSeries(s.name, date, s.values[idx])}</span>` +
             `</div>`,
@@ -626,11 +639,11 @@ function buildOption(
       })
     if (dayMarkers.length) {
       lines.push(
-        `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(232,240,235,.15);color:#9bb5a8;font-size:11px">Opérations</div>`,
+        `<div style="margin-top:8px;padding-top:8px;border-top:1px solid ${LINE(0.18)};color:${THEME.muted};font-size:11px;text-transform:uppercase;letter-spacing:.06em">Opérations</div>`,
       )
       for (const m of dayMarkers) {
         lines.push(
-          `<div style="margin-top:6px;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25)">${formatMarkerTooltip(m)}</div>`,
+          `<div style="margin-top:6px;padding:6px 8px;border-radius:6px;background:${LINE(0.08)}">${formatMarkerTooltip(m)}</div>`,
         )
       }
     }
@@ -671,10 +684,10 @@ function buildOption(
               itemStyle: {
                 color:
                   m.kind === 'entry'
-                    ? '#5fad7a'
+                    ? THEME.ok
                     : m.kind === 'exit'
-                      ? '#e07a5f'
-                      : '#8a9a92',
+                      ? THEME.danger
+                      : THEME.neutral,
               },
             }
           })
@@ -746,12 +759,13 @@ function buildOption(
 
   const option = {
     backgroundColor: 'transparent',
+    color: SERIES_PALETTE,
     animationDurationUpdate: 200,
-    textStyle: { color: '#9bb5a8', fontFamily: 'DM Sans' },
+    textStyle: { color: THEME.muted, fontFamily: THEME.font },
     toolbox: {
       right: 8,
       top: 28,
-      iconStyle: { borderColor: '#9bb5a8' },
+      iconStyle: { borderColor: THEME.muted },
       feature: {
         dataZoom: {
           yAxisIndex: 'none',
@@ -769,9 +783,9 @@ function buildOption(
       // tooltip flips under the cursor (common when dragging right).
       enterable: false,
       hideDelay: 0,
-      backgroundColor: 'rgba(12, 24, 18, 0.96)',
-      borderColor: 'rgba(196, 163, 90, 0.35)',
-      textStyle: { color: '#e8f0eb', fontSize: 12 },
+      backgroundColor: THEME.tooltipBg,
+      borderColor: LINE(0.25),
+      textStyle: { color: THEME.ink, fontSize: 12, fontFamily: THEME.font },
       extraCssText:
         'z-index:2147483646;max-width:min(380px,92vw);pointer-events:none;box-shadow:0 8px 28px rgba(0,0,0,.45);white-space:normal;line-height:1.35',
       position: (
@@ -809,7 +823,7 @@ function buildOption(
         type: 'line',
         snap: true,
         label: { show: false },
-        lineStyle: { color: 'rgba(196, 163, 90, 0.45)', width: 1 },
+        lineStyle: { color: LINE(0.45), width: 1, type: 'dashed' },
       },
       formatter: (params: AxisParam[] | AxisParam) => {
         const list = Array.isArray(params) ? params : [params]
@@ -833,7 +847,10 @@ function buildOption(
     legend: {
       top: 0,
       data: legendNames,
-      textStyle: { color: '#9bb5a8' },
+      textStyle: { color: THEME.muted },
+      icon: 'roundRect',
+      itemWidth: 14,
+      itemHeight: 3,
     },
     grid: {
       left: 55,
@@ -862,14 +879,15 @@ function buildOption(
         end: 100,
         height: 22,
         bottom: 12,
-        borderColor: 'rgba(232,240,235,0.15)',
-        backgroundColor: 'rgba(0,0,0,0.25)',
-        fillerColor: 'rgba(125, 206, 160, 0.18)',
-        handleStyle: { color: '#c4a35a' },
-        textStyle: { color: '#9bb5a8', fontSize: 10 },
+        borderColor: LINE(0.18),
+        backgroundColor: LINE(0.04),
+        fillerColor: ACCENT(0.16),
+        handleStyle: { color: THEME.accent },
+        moveHandleStyle: { color: ACCENT(0.5) },
+        textStyle: { color: THEME.muted, fontSize: 10 },
         dataBackground: {
-          lineStyle: { color: 'rgba(125,206,160,0.35)' },
-          areaStyle: { color: 'rgba(125,206,160,0.08)' },
+          lineStyle: { color: ACCENT(0.4) },
+          areaStyle: { color: ACCENT(0.08) },
         },
       },
     ],
@@ -877,9 +895,9 @@ function buildOption(
       type: 'category',
       data: dates,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: 'rgba(232,240,235,0.2)' } },
+      axisLine: { lineStyle: { color: LINE(0.25) } },
       axisLabel: {
-        color: '#9bb5a8',
+        color: THEME.muted,
         hideOverlap: true,
         showMinLabel: true,
         showMaxLabel: true,
@@ -894,9 +912,9 @@ function buildOption(
       const primary = {
         type: 'value' as const,
         scale: true,
-        splitLine: { lineStyle: { color: 'rgba(232,240,235,0.08)' } },
+        splitLine: { lineStyle: { color: LINE(0.1) } },
         axisLabel: {
-          color: '#9bb5a8',
+          color: THEME.muted,
           formatter: (v: number) => {
             if (mode !== 'index') return compactEur(v)
             const rounded = Math.round(v)
@@ -914,9 +932,9 @@ function buildOption(
           scale: true,
           position: 'right' as const,
           splitLine: { show: false },
-          axisLine: { show: true, lineStyle: { color: 'rgba(110, 181, 255, 0.45)' } },
+          axisLine: { show: true, lineStyle: { color: `rgba(${THEME.triRgb}, 0.45)` } },
           axisLabel: {
-            color: '#6eb5ff',
+            color: THEME.tri,
             formatter: (v: number) =>
               `${v.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} %`,
           },

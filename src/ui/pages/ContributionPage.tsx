@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { EnvelopeType } from '@/domain/types'
+import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import {
   loadEnvelopeProjected,
   loadProjected,
@@ -38,9 +39,6 @@ const fmtPct = (n: number | null) =>
         minimumFractionDigits: 2,
       })} %`
 
-const envelopeLabel = (e: EnvelopeType) =>
-  e === 'PEA_PME' ? 'PEA-PME' : e
-
 export default function ContributionPage() {
   const [envelope, setEnvelope] = useState<Scope>('PEA')
   const [sortKey, setSortKey] = useState<SortKey>('absolute')
@@ -62,7 +60,7 @@ export default function ContributionPage() {
         quotes,
         asOf:
           dates[dates.length - 1] ?? new Date().toISOString().slice(0, 10),
-        envelopes: ['PEA', 'PEA_PME', 'CTO'] as EnvelopeType[],
+        envelopes: [...ALL_ENVELOPES],
       }
     }
     const projected = await loadEnvelopeProjected(envelope)
@@ -179,9 +177,11 @@ export default function ContributionPage() {
               style={{ width: '100%', marginTop: 6 }}
             >
               <option value="ALL">Toutes</option>
-              <option value="PEA">PEA</option>
-              <option value="PEA_PME">PEA-PME</option>
-              <option value="CTO">CTO</option>
+              {ALL_ENVELOPES.map((e) => (
+                <option key={e} value={e}>
+                  {envelopeLabel(e)}
+                </option>
+              ))}
             </select>
           </label>
           <label>

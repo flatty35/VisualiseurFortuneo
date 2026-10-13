@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { EnvelopeType } from '@/domain/types'
+import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import {
   loadEnvelopeProjected,
   loadProjected,
@@ -102,7 +103,7 @@ export default function TriPage() {
     if (!spansMoreThanOneMonth(effectiveT0, effectiveT1)) return []
     // Rebuild valued path for calendar years (same window as result).
     const scopes: EnvelopeType[] =
-      data.scope === 'ALL' ? ['PEA', 'PEA_PME', 'CTO'] : [data.scope]
+      data.scope === 'ALL' ? [...ALL_ENVELOPES] : [data.scope]
     const valuedParts = scopes.map((env) => {
       const vo = data.vos.find((v) => v.envelope === env) ?? null
       const holdings = buildHoldingsSeries({
@@ -141,7 +142,7 @@ export default function TriPage() {
   const external = useMemo(() => {
     if (!data || !effectiveT0 || !effectiveT1) return null
     if (data.scope === 'ALL') {
-      return (['PEA', 'PEA_PME', 'CTO'] as EnvelopeType[]).reduce(
+      return ALL_ENVELOPES.reduce(
         (acc, env) => {
           const x = sumEnvelopeExternalFlows({
             operations: data.operations,
@@ -192,9 +193,11 @@ export default function TriPage() {
               style={{ width: '100%', marginTop: 6 }}
             >
               <option value="ALL">Toutes</option>
-              <option value="PEA">PEA</option>
-              <option value="PEA_PME">PEA-PME</option>
-              <option value="CTO">CTO</option>
+              {ALL_ENVELOPES.map((e) => (
+                <option key={e} value={e}>
+                  {envelopeLabel(e)}
+                </option>
+              ))}
             </select>
           </label>
           <label>

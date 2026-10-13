@@ -20,6 +20,16 @@ export interface OperationMarker {
   /** Average cost (PRU) after this op, if computable */
   pruAfter?: number
   name?: string
+  /** Instrument currency of price / PRU (net amount and fees stay in EUR). */
+  currency?: string
+}
+
+/** Fees are booked in the account currency; express them in the quote currency. */
+export function feesInQuoteCurrency(op: Operation): number {
+  const fees = Math.abs(op.fees ?? 0)
+  return op.instrumentCurrency && op.fxRate !== undefined && op.fxRate > 0
+    ? fees / op.fxRate
+    : fees
 }
 
 function isQtyOp(type: OperationType): boolean {
@@ -168,7 +178,7 @@ export function buildOperationMarkers(operations: Operation[]): OperationMarker[
       const q = op.quantity ?? 0
       const delta = signedQty(op.type, q)
       const px = op.price ?? 0
-      const fees = Math.abs(op.fees ?? 0)
+      const fees = feesInQuoteCurrency(op)
       const freeShare = op.type === 'ACTIONS_GRATUITES'
 
       if (delta > 0) {
@@ -208,6 +218,7 @@ export function buildOperationMarkers(operations: Operation[]): OperationMarker[
       pruAfter:
         pruAfter !== undefined ? Math.round(pruAfter * 10000) / 10000 : undefined,
       name: op.name,
+      currency: op.instrumentCurrency,
     })
   }
 
@@ -242,37 +253,30 @@ function kindLabel(m: OperationMarker): string {
   return `■ ${m.type}`
 }
 
+function money(n: number, currency = 'EUR'): string {
+  return n.toLocaleString('fr-FR', { style: 'currency', currency })
+}
+
 export function formatMarkerTooltipLines(m: OperationMarker): string[] {
+  const quoteCur = m.currency || 'EUR'
   const lines: string[] = [`${kindLabel(m)} — ${m.type}`, `Date : ${m.date}`]
   if (m.name) lines.push(`Titre : ${m.name}`)
   if (m.quantity !== undefined) lines.push(`Quantité : ${m.quantity}`)
-  if (m.price !== undefined) {
-    lines.push(
-      `Cours : ${m.price.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
-    )
-  }
+  if (m.price !== undefined) lines.push(`Cours : ${money(m.price, quoteCur)}`)
   if (m.netAmount !== undefined) {
-    lines.push(
-      `Montant net : ${m.netAmount.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
-    )
+    lines.push(`Montant net : ${money(m.netAmount)}`)
   }
   if (m.fees !== undefined && m.fees !== 0) {
-    lines.push(
-      `Frais : ${m.fees.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
-    )
+    lines.push(`Frais : ${money(m.fees)}`)
   }
   if (m.taxAmount !== undefined && m.taxAmount > 0) {
-    lines.push(
-      `TTF / taxe : ${m.taxAmount.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
-    )
+    lines.push(`TTF / taxe : ${money(m.taxAmount)}`)
   }
   if (m.qtyAfter !== undefined && m.kind !== 'event') {
     lines.push(`Qté après : ${m.qtyAfter}`)
   }
   if (m.pruAfter !== undefined && m.kind !== 'event') {
-    lines.push(
-      `PRU après : ${m.pruAfter.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}`,
-    )
+    lines.push(`PRU après : ${money(m.pruAfter, quoteCur)}`)
   }
   if (m.label) lines.push(m.label)
   if (m.taxLabel && m.taxLabel !== m.label) lines.push(m.taxLabel)

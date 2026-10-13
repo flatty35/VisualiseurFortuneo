@@ -6,7 +6,12 @@ import type {
   VirtualOpening,
 } from '@/domain/types'
 import { toBusinessDay } from './businessDays'
-import { isBuyTrade, isSellTrade, tradeCashAmount } from './cashImpact'
+import {
+  cashModeForEnvelope,
+  isBuyTrade,
+  isSellTrade,
+  tradeCashAmount,
+} from './cashImpact'
 import { buildHoldingsSeries } from './positions'
 import { priceOnDate, valueHoldingsSeries } from './valuation'
 
@@ -123,8 +128,16 @@ function normalizeLabel(s: string): string {
  */
 export function externalCashFlowDirection(
   op: Operation,
+  scope: 'envelope' | 'position' = 'envelope',
 ): 'in' | 'out' | null {
-  if (op.synthetic || !op.isin) return null
+  if (op.synthetic) return null
+  // Saxo: cash is inside the valuation — only versements / retraits cross it.
+  if (scope === 'envelope' && cashModeForEnvelope(op.envelope) === 'ledger') {
+    if (op.type === 'VERSEMENT') return 'in'
+    if (op.type === 'RETRAIT') return 'out'
+    return null
+  }
+  if (!op.isin) return null
   if (isBuyTrade(op.type)) return 'in'
   if (isSellTrade(op.type)) return 'out'
   if (op.type === 'DIVIDENDE' || op.type === 'TAXE' || op.type === 'FRAIS') {
@@ -138,11 +151,23 @@ export function externalCashFlowDirection(
 /** TRI flow of one operation (sign convention: in = negative). */
 function operationFlow(
   op: Operation,
+  scope: 'envelope' | 'position',
   fallbackPrice?: (op: Operation) => number | undefined,
 ): CashFlow | null {
-  const dir = externalCashFlowDirection(op)
+  const dir = externalCashFlowDirection(op, scope)
   if (!dir) return null
-  let abs = Math.abs(tradeCashAmount(op))
+  let abs = op.isin
+    ? Math.abs(tradeCashAmount(op))
+    : Math.abs(op.netAmount ?? 0)
+  // A USD line is valued in USD: express its flows in USD too.
+  if (
+    scope === 'position' &&
+    op.instrumentCurrency &&
+    op.fxRate !== undefined &&
+    op.fxRate > 0
+  ) {
+    abs /= op.fxRate
+  }
   if (abs < 1e-9 && fallbackPrice && op.quantity) {
     const px = fallbackPrice(op)
     if (px !== undefined && Number.isFinite(px) && px > 0) {
@@ -171,7 +196,7 @@ function byDateThenLabel(a: CashFlow, b: CashFlow): number {
  * already inside startValue and must not be counted again.
  */
 export function computePortfolioTri(input: {
-  envelope: 'PEA' | 'PEA_PME' | 'CTO'
+  envelope: EnvelopeType
   operations: Operation[]
   supports: Support[]
   quotes: Map<string, QuoteBar[]>
@@ -306,7 +331,7 @@ export function listEnvelopeExternalFlows(input: {
   const out: CashFlow[] = []
   for (const op of input.operations) {
     if (op.envelope !== input.envelope) continue
-    const flow = operationFlow(op)
+    const flow = operationFlow(op, 'envelope')
     if (!flow || flow.date < from || flow.date > to) continue
     if (!includeStart && flow.date <= from) continue
     out.push(flow)
@@ -349,7 +374,7 @@ export function listPositionTradeFlows(input: {
   for (const op of input.operations) {
     if (op.isin !== input.isin) continue
     if (input.envelope && op.envelope !== input.envelope) continue
-    const flow = operationFlow(op, marketPrice)
+    const flow = operationFlow(op, 'position', marketPrice)
     if (!flow || flow.date <= from || flow.date > to) continue
     out.push(flow)
   }
@@ -613,7 +638,7 @@ export function spansMoreThanOneMonth(
   return months >= 1
 }
 
-const ALL_ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO']
+const ALL_ENVELOPES: EnvelopeType[] = ['PEA', 'PEA_PME', 'CTO', 'CTO_SAXO']
 
 /**
  * Consolidated TRI across envelopes: every envelope's own synthetic buy /

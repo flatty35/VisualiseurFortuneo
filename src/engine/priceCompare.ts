@@ -1,18 +1,11 @@
 import type { Operation, OperationType, QuoteBar, Support } from '@/domain/types'
 import type { HoldingsSnapshot } from './positions'
 import type { ChartSeries } from '@/ui/components/PortfolioChart'
+import { SERIES_PALETTE, THEME } from '@/ui/theme'
+import { feesInQuoteCurrency } from './markers'
 import { priceOnDate } from './valuation'
 
-const PALETTE = [
-  '#7dcea0',
-  '#c4a35a',
-  '#6eb5ff',
-  '#e07a5f',
-  '#b39ddb',
-  '#4db6ac',
-  '#ffb74d',
-  '#90a4ae',
-]
+const PALETTE = SERIES_PALETTE
 
 /** First real purchase date, else POSITION_SEED. */
 export function firstBuyDate(operations: Operation[], isin: string): string | undefined {
@@ -225,7 +218,7 @@ export function buildPruStepSeries(input: {
   for (const op of ops) {
     const delta = signedPruQty(op.type, op.quantity ?? 0)
     const px = op.price ?? 0
-    const fees = Math.abs(op.fees ?? 0)
+    const fees = feesInQuoteCurrency(op)
     const freeShare = op.type === 'ACTIONS_GRATUITES'
     if (delta > 0) {
       cost += freeShare ? 0 : delta * px + fees
@@ -277,7 +270,7 @@ export function buildPruStepSeries(input: {
     dates,
     values,
     realPrices,
-    color: '#c4a35a',
+    color: THEME.pru,
     dashed: false,
     step: 'end',
     valueUnit: 'pct',

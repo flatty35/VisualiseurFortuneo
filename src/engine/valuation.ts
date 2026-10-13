@@ -234,6 +234,63 @@ export function buildAverageUnitCostByDate(
   return out
 }
 
+/**
+ * Latest FX (account per 1 instrument unit) on/before date, per ISIN.
+ * Built from operation.fxRate (Saxo « Taux de change »).
+ */
+export function buildFxRateByDate(
+  operations: Operation[],
+  dates: string[],
+): Map<string, Map<string, number>> {
+  const events = operations
+    .filter(
+      (o) =>
+        o.isin &&
+        o.fxRate !== undefined &&
+        Number.isFinite(o.fxRate) &&
+        o.fxRate > 0,
+    )
+    .map((o) => ({
+      isin: o.isin!,
+      day: toBusinessDay(o.date),
+      fx: o.fxRate!,
+    }))
+    .sort((a, b) => a.day.localeCompare(b.day))
+
+  const last = new Map<string, number>()
+  let ei = 0
+  const out = new Map<string, Map<string, number>>()
+  for (const date of dates) {
+    while (ei < events.length && events[ei].day <= date) {
+      last.set(events[ei].isin, events[ei].fx)
+      ei += 1
+    }
+    out.set(date, new Map(last))
+  }
+  return out
+}
+
+/** Last account-per-instrument FX rate seen on or before `date` for an ISIN. */
+export function lastFxRate(
+  operations: Operation[],
+  isin: string,
+  date: string,
+): number | undefined {
+  let best: { date: string; fx: number } | undefined
+  for (const o of operations) {
+    if (o.isin !== isin || o.date > date) continue
+    if (o.fxRate === undefined || !(o.fxRate > 0)) continue
+    if (!best || o.date >= best.date) best = { date: o.date, fx: o.fxRate }
+  }
+  return best?.fx
+}
+
+function isEuroCurrency(c: string | undefined): boolean {
+  if (!c) return true
+  const u = c.toUpperCase()
+  return u === 'EUR' || u === '€'
+}
+
 export function valueHoldingsSeries(input: {
   holdings: HoldingsSnapshot[]
   supports: Support[]
@@ -244,27 +301,36 @@ export function valueHoldingsSeries(input: {
 }): ValuePoint[] {
   const supportByIsin = new Map(input.supports.map((s) => [s.isin, s]))
   const filter = input.isinFilter ? new Set(input.isinFilter) : null
+  const dates = input.holdings.map((h) => h.date)
   const costByDate =
     input.operations && input.operations.length > 0
-      ? buildAverageUnitCostByDate(
-          input.operations,
-          input.holdings.map((h) => h.date),
-        )
+      ? buildAverageUnitCostByDate(input.operations, dates)
+      : null
+  const fxByDate =
+    input.operations && input.operations.length > 0
+      ? buildFxRateByDate(input.operations, dates)
       : null
 
   return input.holdings.map((h) => {
     let securities = 0
     const byIsin: Record<string, number> = {}
     const costs = costByDate?.get(h.date)
+    const fxMap = fxByDate?.get(h.date)
     for (const [isin, qty] of h.quantities) {
       if (filter && !filter.has(isin)) continue
       if (Math.abs(qty) < 1e-10) continue
+      const support = supportByIsin.get(isin)
       const px =
-        priceOnDate(h.date, supportByIsin.get(isin), input.quotes) ??
-        costs?.get(isin)
-      const val = px !== undefined ? qty * px : 0
-      byIsin[isin] = val
-      securities += val
+        priceOnDate(h.date, support, input.quotes) ?? costs?.get(isin)
+      // Native quote currency (USD curve stays in USD for per-line charts)
+      const native = px !== undefined ? qty * px : 0
+      byIsin[isin] = native
+      if (isEuroCurrency(support?.quoteCurrency)) {
+        securities += native
+      } else {
+        const fx = fxMap?.get(isin)
+        securities += fx !== undefined ? native * fx : native
+      }
     }
     const cash = filter ? 0 : h.cash
     return {

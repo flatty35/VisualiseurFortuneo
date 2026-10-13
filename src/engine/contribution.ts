@@ -6,6 +6,8 @@ import type {
   VirtualOpening,
 } from '@/domain/types'
 import {
+  cashImpact,
+  cashModeForEnvelope,
   isBuyTrade,
   isSellTrade,
   tradeCashAmount,
@@ -13,7 +15,7 @@ import {
 import { toBusinessDay } from './businessDays'
 import { buildHoldingsSeries } from './positions'
 import { computeIrr, type CashFlow } from './tri'
-import { priceOnDate } from './valuation'
+import { lastFxRate, priceOnDate } from './valuation'
 
 export interface PositionContribution {
   envelope: EnvelopeType
@@ -108,6 +110,20 @@ export function computeEnvelopeCapital(input: {
     let grossBuys = 0
     let reinvested = 0
     let cash = 0
+
+    // Saxo: the file is the full cash journal — apports = versements − retraits
+    if (cashModeForEnvelope(envelope) === 'ledger') {
+      for (const op of ops) {
+        if (op.synthetic) continue
+        if (op.type === 'VERSEMENT' || op.type === 'RETRAIT') {
+          invested += op.netAmount ?? 0
+        }
+        if (isBuyTrade(op.type)) grossBuys += Math.abs(tradeCashAmount(op))
+        cash += cashImpact(op, 'ledger')
+      }
+      reinvested = Math.max(0, grossBuys - Math.max(0, invested))
+      return { envelope, invested, grossBuys, reinvested, cash }
+    }
 
     if (vo) {
       const day = toBusinessDay(vo.date)
@@ -316,7 +332,12 @@ export function computePositionContributions(input: {
       if (open) {
         const px = priceOnDate(asOf, support, input.quotes)
         if (px !== undefined && px > 0) {
-          marketValue = Math.abs(quantity) * px
+          // Invested / proceeds are booked in EUR: convert USD lines
+          const fx =
+            support?.quoteCurrency && support.quoteCurrency !== 'EUR'
+              ? lastFxRate(ops, isin, asOf)
+              : undefined
+          marketValue = Math.abs(quantity) * px * (fx ?? 1)
           flows.push({
             date: asOf,
             amount: marketValue,

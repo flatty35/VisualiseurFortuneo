@@ -27,7 +27,10 @@ import type {
 } from './types'
 
 export function envelopeTypeToKind(t: EnvelopeType): EnvelopeKindName {
-  return t === 'PEA_PME' ? 'PEA_PME' : t === 'CTO' ? 'CTO' : 'PEA'
+  if (t === 'PEA_PME') return 'PEA_PME'
+  if (t === 'CTO') return 'CTO'
+  if (t === 'CTO_SAXO') return 'CTO_SAXO'
+  return 'PEA'
 }
 
 export function kindToEnvelopeType(kind: EnvelopeKindName): EnvelopeType {
@@ -72,6 +75,13 @@ export function flatOpToDomain(
       grossAmount: op.grossAmount,
       isin: op.isin,
       ...(op.place ? { place: op.place } : {}),
+      ...(op.instrumentCurrency
+        ? { instrumentCurrency: op.instrumentCurrency }
+        : {}),
+      ...(op.instrumentAmount !== undefined
+        ? { instrumentAmount: op.instrumentAmount }
+        : {}),
+      ...(op.fxRate !== undefined ? { fxRate: op.fxRate } : {}),
     },
   })
 }
@@ -116,6 +126,18 @@ export function domainOpToFlat(
         ? op.amount
         : undefined,
     currency: op.currency,
+    instrumentCurrency:
+      typeof op.customDetails.instrumentCurrency === 'string'
+        ? op.customDetails.instrumentCurrency
+        : undefined,
+    instrumentAmount:
+      typeof op.customDetails.instrumentAmount === 'number'
+        ? op.customDetails.instrumentAmount
+        : undefined,
+    fxRate:
+      typeof op.customDetails.fxRate === 'number'
+        ? op.customDetails.fxRate
+        : undefined,
     place:
       typeof op.customDetails.place === 'string'
         ? op.customDetails.place
@@ -153,6 +175,7 @@ export function flatSupportToDomain(s: FlatSupport, uniqueID: number): Support {
     staticDatedValues: manualAsStatic,
     lastKnownValue:
       s.staticPrice !== undefined ? [0, s.staticPrice] : ([0, 0] as [number, number]),
+    quoteCurrency: s.quoteCurrency || undefined,
   })
 }
 
@@ -176,6 +199,7 @@ export function domainSupportToFlat(s: Support): FlatSupport {
     boursoramaTicker: s.boursoramaTicker || undefined,
     manualPrices,
     staticPrice,
+    quoteCurrency: s.quoteCurrency || undefined,
   }
 }
 

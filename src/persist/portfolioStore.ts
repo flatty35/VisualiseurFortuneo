@@ -177,6 +177,7 @@ function applyFlatSupport(p: Portfolio, flat: Support): void {
     existing.boursoramaTicker = flat.boursoramaTicker ?? ''
     existing.getterType = getterType
     existing.staticDatedValues = manualAsStatic
+    if (flat.quoteCurrency) existing.quoteCurrency = flat.quoteCurrency
     if (flat.staticPrice !== undefined) {
       existing.lastKnownValue = [0, flat.staticPrice]
     }
@@ -198,6 +199,7 @@ function applyFlatSupport(p: Portfolio, flat: Support): void {
       googleFinanceTicker: flat.googleTicker ?? '',
       boursoramaTicker: flat.boursoramaTicker ?? '',
       staticDatedValues: manualAsStatic,
+      quoteCurrency: flat.quoteCurrency || undefined,
       lastKnownValue:
         flat.staticPrice !== undefined
           ? ([0, flat.staticPrice] as [number, number])

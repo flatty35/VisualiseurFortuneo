@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EnvelopeType, Operation, Support } from '@/domain/types'
+import { ALL_ENVELOPES } from '@/domain/envelopes'
 import { loadProjected } from '@/persist/portfolioStore'
 import {
   isValidIsin,
@@ -90,7 +91,7 @@ export default function MappingsPage() {
     const held = new Set<string>()
     const envelopesByIsin = new Map<string, Set<EnvelopeType>>()
 
-    for (const env of ['PEA', 'PEA_PME', 'CTO'] as EnvelopeType[]) {
+    for (const env of ALL_ENVELOPES) {
       const ops = operations.filter((o) => o.envelope === env)
       if (!ops.length) continue
       const vo = openings.find((o) => o.envelope === env) ?? null
@@ -739,7 +740,7 @@ export default function MappingsPage() {
                 style={{
                   maxHeight: 200,
                   overflowY: 'auto',
-                  border: '1px solid rgba(232,240,235,0.12)',
+                  border: '1px solid var(--line)',
                   borderRadius: 10,
                   background: 'rgba(0,0,0,0.2)',
                 }}
@@ -910,7 +911,7 @@ export default function MappingsPage() {
                   marginTop: 10,
                   maxHeight: 220,
                   overflowY: 'auto',
-                  border: '1px solid rgba(232,240,235,0.12)',
+                  border: '1px solid var(--line)',
                   borderRadius: 10,
                   background: 'rgba(0,0,0,0.2)',
                 }}
@@ -940,7 +941,7 @@ export default function MappingsPage() {
                           key={c.isin}
                           style={
                             selectedIsin || isSuggested
-                              ? { background: 'rgba(196, 163, 90, 0.12)' }
+                              ? { background: 'rgba(79, 140, 255, 0.12)' }
                               : undefined
                           }
                         >
@@ -1079,7 +1080,7 @@ export default function MappingsPage() {
                     marginTop: 10,
                     maxHeight: 220,
                     overflowY: 'auto',
-                    border: '1px solid rgba(232,240,235,0.12)',
+                    border: '1px solid var(--line)',
                     borderRadius: 10,
                     background: 'rgba(0,0,0,0.2)',
                   }}
@@ -1115,9 +1116,9 @@ export default function MappingsPage() {
                             key={c.symbol}
                             style={
                               selectedYahoo
-                                ? { background: 'rgba(196, 163, 90, 0.12)' }
+                                ? { background: 'rgba(79, 140, 255, 0.12)' }
                                 : nearOp
-                                  ? { background: 'rgba(80, 160, 120, 0.12)' }
+                                  ? { background: 'rgba(34, 195, 142, 0.12)' }
                                   : undefined
                             }
                           >

@@ -1,7 +1,13 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { EnvelopeType, ImportReport } from '@/domain/types'
+import {
+  type BrokerId,
+  envelopeLabel,
+  envelopesForBroker,
+} from '@/domain/envelopes'
 import { parseTitresCsv } from '@/import/fortuneoTitres'
 import { parsePositionsFile } from '@/import/positionsXls'
+import { parseSaxoTransactionsFile } from '@/import/saxoTransactions'
 import { mergeImport } from '@/import/merge'
 import { isLocalSupportId } from '@/import/resolveIsin'
 import { autoResolveSupports } from '@/quotes/identityResolver'
@@ -11,18 +17,17 @@ import {
   clearEnvelopeOperations,
   listFlatSupports,
   loadEnvelopeProjected,
+  putFlatSupports,
 } from '@/persist/portfolioStore'
-
-const ENVELOPES: { value: EnvelopeType; label: string }[] = [
-  { value: 'PEA', label: 'PEA' },
-  { value: 'PEA_PME', label: 'PEA-PME' },
-  { value: 'CTO', label: 'CTO' },
-]
+import { googleTickerFromYahoo } from '@/quotes/tickerMatch'
 
 export default function ImportPage() {
+  const [broker, setBroker] = useState<BrokerId>('fortuneo')
+  const brokerEnvelopes = useMemo(() => envelopesForBroker(broker), [broker])
   const [envelope, setEnvelope] = useState<EnvelopeType>('PEA')
   const [titres, setTitres] = useState<File | null>(null)
   const [positions, setPositions] = useState<File | null>(null)
+  const [saxoFile, setSaxoFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState<ImportReport | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -31,11 +36,21 @@ export default function ImportPage() {
   const [progressPct, setProgressPct] = useState(0)
   const [resetMsg, setResetMsg] = useState<string | null>(null)
 
+  const onBrokerChange = (next: BrokerId) => {
+    setBroker(next)
+    const allowed = envelopesForBroker(next)
+    if (!allowed.includes(envelope)) setEnvelope(allowed[0])
+    setTitres(null)
+    setPositions(null)
+    setSaxoFile(null)
+    setReport(null)
+    setError(null)
+  }
+
   const onResetEnvelope = async () => {
     setError(null)
     setResetMsg(null)
-    const label =
-      ENVELOPES.find((e) => e.value === envelope)?.label ?? envelope
+    const label = envelopeLabel(envelope)
     if (
       !confirm(
         `Effacer toutes les opérations de l’enveloppe ${label} ?\n\nLes correspondances (tickers) sont conservées. Vous pourrez réimporter l’historique ensuite.`,
@@ -58,18 +73,40 @@ export default function ImportPage() {
     setReport(null)
     setProgress(null)
     setProgressPct(0)
-    if (!titres || !positions) {
+
+    if (broker === 'fortuneo' && (!titres || !positions)) {
       setError('Historique titres et positions ouvertes sont requis.')
       return
     }
+    if (broker === 'saxo' && !saxoFile) {
+      setError('Le fichier Transactions Saxo (.xlsx) est requis.')
+      return
+    }
+
     setBusy(true)
     try {
       setProgress('Lecture des fichiers…')
       setProgressPct(8)
-      const [titresOps, pos] = await Promise.all([
-        parseTitresCsv(titres, envelope),
-        parsePositionsFile(positions),
-      ])
+
+      let titresOps
+      let pos
+      let inferredCash: number | undefined
+      let tickerHints: Record<string, string> = {}
+      let currencyHints: Record<string, string> = {}
+
+      if (broker === 'saxo') {
+        const parsed = await parseSaxoTransactionsFile(saxoFile!, envelope)
+        titresOps = parsed.operations
+        pos = parsed.positions
+        inferredCash = parsed.inferredCash
+        tickerHints = parsed.tickerHints
+        currencyHints = parsed.currencyHints
+      } else {
+        ;[titresOps, pos] = await Promise.all([
+          parseTitresCsv(titres!, envelope),
+          parsePositionsFile(positions!),
+        ])
+      }
 
       setProgress(
         `Fichiers lus — ${titresOps.length} ops titres, ${pos.length} positions`,
@@ -77,9 +114,13 @@ export default function ImportPage() {
       setProgressPct(25)
 
       const cashRaw = cashOverride.replace(',', '.').trim()
-      const currentCash = cashRaw === '' ? undefined : Number(cashRaw)
+      let currentCash =
+        cashRaw === '' ? inferredCash : Number(cashRaw)
       if (cashRaw !== '' && !Number.isFinite(currentCash)) {
         throw new Error('Espèces actuelles invalides')
+      }
+      if (currentCash !== undefined && !Number.isFinite(currentCash)) {
+        currentCash = undefined
       }
 
       setProgress('Fusion & reconstruction du portefeuille virtuel…')
@@ -89,9 +130,54 @@ export default function ImportPage() {
         titresOps,
         positions: pos,
         currentCash,
+        skipVirtualOpening: broker === 'saxo',
+        currencyHints:
+          broker === 'saxo' && Object.keys(currencyHints).length
+            ? currencyHints
+            : undefined,
       })
 
-      // Scope to this envelope only — avoid re-resolving PEA when importing PEA-PME
+      if (broker === 'saxo') {
+        r.warnings.push(
+          'Saxo : positions actuelles dérivées de l’historique (compte depuis l’ouverture). Pas de fichier positions séparé.',
+        )
+        const hints = Object.entries(tickerHints)
+        if (hints.length) {
+          const supports = await listFlatSupports()
+          const updates = supports
+            .filter(
+              (s) =>
+                (!s.yahooTicker && tickerHints[s.isin]) ||
+                (!s.quoteCurrency && currencyHints[s.isin]),
+            )
+            .map((s) => {
+              const t = tickerHints[s.isin]
+              const cur = currencyHints[s.isin]
+              return {
+                ...s,
+                ...(t && !s.yahooTicker
+                  ? {
+                      yahooTicker: t,
+                      googleTicker: s.googleTicker ?? googleTickerFromYahoo(t),
+                    }
+                  : {}),
+                ...(cur && !s.quoteCurrency
+                  ? { quoteCurrency: cur.toUpperCase() }
+                  : {}),
+              }
+            })
+          if (updates.length) {
+            await putFlatSupports(updates)
+            const tickers = updates.filter((s) => s.yahooTicker).length
+            if (tickers) {
+              r.warnings.push(
+                `Saxo : ${tickers} ticker(s) Yahoo préremplis depuis le symbole (ex. FOLOW:xpar → FOLOW.PA).`,
+              )
+            }
+          }
+        }
+      }
+
       const envSupports = async () => {
         const envIsins = new Set(
           (await loadEnvelopeProjected(envelope)).operations
@@ -115,7 +201,6 @@ export default function ImportPage() {
         )
       }
 
-      // Slow GAS cascade only for real ISINs still lacking a ticker
       const after = await envSupports()
       const pending = after.filter((s) => !s.yahooTicker && !isLocalSupportId(s.isin))
       const locals = after.filter((s) => isLocalSupportId(s.isin))
@@ -157,51 +242,89 @@ export default function ImportPage() {
   return (
     <div>
       <section className="panel">
-        <h1 style={{ marginTop: 0 }}>Import Fortuneo</h1>
+        <h1 style={{ marginTop: 0 }}>Import</h1>
         <p className="muted">
-          Historique titres + positions ouvertes (CSV, XLS ou ZIP). Pas de fichier
-          espèces : chaque achat est un apport (argent investi ce jour-là), sans
-          poche cash cumulative. Le solde espèces saisi n’apparaît qu’en fin de
-          période. Un réimport n’ajoute que les opérations encore inconnues.
+          Choisissez le courtier puis l’enveloppe. Fortuneo : historique titres +
+          positions. Saxo : un seul export Transactions (.xlsx) depuis l’ouverture
+          du compte. Un réimport n’ajoute que les opérations encore inconnues.
         </p>
 
-        <label style={{ display: 'block', marginBottom: '1rem' }}>
-          <span className="muted">Enveloppe</span>
-          <br />
-          <select
-            value={envelope}
-            onChange={(e) => setEnvelope(e.target.value as EnvelopeType)}
-            style={{ marginTop: 6, minWidth: 200 }}
-          >
-            {ENVELOPES.map((e) => (
-              <option key={e.value} value={e.value}>
-                {e.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="grid-2">
-          <FileField label="Historique titres (CSV / ZIP)" file={titres} onChange={setTitres} />
-          <FileField
-            label="Positions ouvertes (XLS / CSV / ZIP)"
-            file={positions}
-            onChange={setPositions}
-            accept=".xls,.xlsx,.csv,.zip"
-          />
+        <div className="grid-2" style={{ marginBottom: '1rem' }}>
           <label>
-            <span className="muted">
-              Espèces actuelles (€) — solde cash du compte (positions ou saisie)
-            </span>
+            <span className="muted">Courtier</span>
             <br />
-            <input
-              value={cashOverride}
-              onChange={(e) => setCashOverride(e.target.value)}
-              placeholder="ex. 1523,45 (défaut 0)"
-              style={{ width: '100%', marginTop: 6 }}
-            />
+            <select
+              value={broker}
+              onChange={(e) => onBrokerChange(e.target.value as BrokerId)}
+              style={{ marginTop: 6, width: '100%' }}
+            >
+              <option value="fortuneo">Fortuneo</option>
+              <option value="saxo">Saxo Bank</option>
+            </select>
+          </label>
+          <label>
+            <span className="muted">Enveloppe</span>
+            <br />
+            <select
+              value={envelope}
+              onChange={(e) => setEnvelope(e.target.value as EnvelopeType)}
+              style={{ marginTop: 6, width: '100%' }}
+            >
+              {brokerEnvelopes.map((e) => (
+                <option key={e} value={e}>
+                  {envelopeLabel(e)}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
+
+        {broker === 'fortuneo' ? (
+          <div className="grid-2">
+            <FileField
+              label="Historique titres (CSV / ZIP)"
+              file={titres}
+              onChange={setTitres}
+            />
+            <FileField
+              label="Positions ouvertes (XLS / CSV / ZIP)"
+              file={positions}
+              onChange={setPositions}
+              accept=".xls,.xlsx,.csv,.zip"
+            />
+          </div>
+        ) : (
+          <div className="grid-2">
+            <FileField
+              label="Transactions Saxo (XLSX)"
+              file={saxoFile}
+              onChange={setSaxoFile}
+              accept=".xlsx,.xls"
+            />
+            <p className="muted" style={{ margin: 0, alignSelf: 'center' }}>
+              Export « Transactions » (feuilles Transactions + Opérations). Les
+              positions ouvertes sont recalculées depuis l’historique.
+            </p>
+          </div>
+        )}
+
+        <label style={{ display: 'block', marginTop: '1rem' }}>
+          <span className="muted">
+            Espèces actuelles (€) — solde cash du compte
+            {broker === 'saxo' ? ' (sinon estimé depuis l’historique)' : ''}
+          </span>
+          <br />
+          <input
+            value={cashOverride}
+            onChange={(e) => setCashOverride(e.target.value)}
+            placeholder={
+              broker === 'saxo'
+                ? 'ex. 1523,45 (laisser vide = estimé)'
+                : 'ex. 1523,45 (défaut 0)'
+            }
+            style={{ width: '100%', marginTop: 6 }}
+          />
+        </label>
 
         <div style={{ marginTop: '1.25rem' }}>
           <button className="btn btn-primary" disabled={busy} onClick={onImport}>
@@ -226,15 +349,15 @@ export default function ImportPage() {
                 style={{
                   height: '100%',
                   width: `${progressPct}%`,
-                  background: 'linear-gradient(90deg, #2f6b4f, #c4a35a)',
+                  background: 'var(--accent)',
                   transition: 'width 0.2s ease',
                 }}
               />
             </div>
             {!isProxyConfigured() && (
               <p className="muted" style={{ fontSize: '0.85rem', marginTop: 8 }}>
-                Proxy non configuré : l’import local reste rapide, mais le matching Yahoo sera
-                limité à la table locale. Voir <code>gas/README.md</code>.
+                Proxy non configuré : l’import local reste rapide, mais le matching
+                Yahoo sera limité à la table locale. Voir <code>gas/README.md</code>.
               </p>
             )}
           </div>
@@ -259,11 +382,11 @@ export default function ImportPage() {
           </h2>
           <p className="muted" style={{ marginTop: 0 }}>
             Efface les opérations et l’ouverture virtuelle de{' '}
-            <strong>{ENVELOPES.find((e) => e.value === envelope)?.label}</strong>{' '}
-            uniquement. Les correspondances (page Correspondances) restent.
+            <strong>{envelopeLabel(envelope)}</strong> uniquement. Les
+            correspondances (page Correspondances) restent.
           </p>
           <button type="button" className="btn" onClick={onResetEnvelope} disabled={busy}>
-            Vider les opérations ({ENVELOPES.find((e) => e.value === envelope)?.label})
+            Vider les opérations ({envelopeLabel(envelope)})
           </button>
         </div>
 

@@ -1,7 +1,7 @@
 import type { PortfolioData } from './portfolioModel'
 
 /** Envelope types supported in v1 */
-export type EnvelopeType = 'PEA' | 'PEA_PME' | 'CTO'
+export type EnvelopeType = 'PEA' | 'PEA_PME' | 'CTO' | 'CTO_SAXO'
 
 export type OperationType =
   | 'ACHAT'
@@ -39,6 +39,11 @@ export interface Support {
   manualPrices: ManualPrice[]
   /** Fallback constant price when no Yahoo / manual history */
   staticPrice?: number
+  /**
+   * Quote / instrument currency (e.g. USD). EUR or unset = euro book.
+   * Yahoo/Morningstar closes are in this currency; chart display follows it.
+   */
+  quoteCurrency?: string
 }
 
 export interface Operation {
@@ -54,7 +59,23 @@ export interface Operation {
   grossAmount?: number
   fees?: number
   netAmount?: number
+  /** Account / booked currency (usually EUR). */
   currency?: string
+  /**
+   * Instrument quote currency when different from account (e.g. USD).
+   * Empty/undefined when the support trades in EUR.
+   */
+  instrumentCurrency?: string
+  /**
+   * Signed notional in instrument currency (qty × price).
+   * Left undefined when instrument currency is EUR / same as account.
+   */
+  instrumentAmount?: number
+  /**
+   * Account currency per 1 unit of instrument currency (Saxo « Taux de change »).
+   * EUR = instrumentAmount × fxRate (approx., fees aside).
+   */
+  fxRate?: number
   /** Fortuneo « Place » column (e.g. Euronext Paris) — listing hint for resolution */
   place?: string
   label: string

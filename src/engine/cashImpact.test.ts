@@ -36,6 +36,45 @@ describe('titres-only cash model', () => {
     ).toBe(0)
   })
 
+  it('titres mode ignores frais / dividendes (Fortuneo idle cash = reportedCash)', () => {
+    expect(
+      cashImpact(
+        op({ type: 'FRAIS', label: 'Intérêts client', netAmount: -0.2 }),
+      ),
+    ).toBe(0)
+  })
+
+  it('ledger mode applies trades + frais + dividendes (Saxo)', () => {
+    expect(
+      cashImpact(
+        op({
+          type: 'ACHAT',
+          label: 'achat',
+          netAmount: -100,
+          isin: 'US0231351067',
+        }),
+        'ledger',
+      ),
+    ).toBeCloseTo(-100)
+    expect(
+      cashImpact(
+        op({ type: 'FRAIS', label: 'Intérêts client', netAmount: -0.2 }),
+        'ledger',
+      ),
+    ).toBeCloseTo(-0.2)
+    expect(
+      cashImpact(
+        op({
+          type: 'DIVIDENDE',
+          label: 'Réinvestissement',
+          netAmount: 4.41,
+          isin: 'GB0031348658',
+        }),
+        'ledger',
+      ),
+    ).toBeCloseTo(4.41)
+  })
+
   it('tradeCashAmount keeps signed Montant net for TRI apports', () => {
     expect(
       tradeCashAmount(
