@@ -43,6 +43,19 @@ export interface ChartSeries {
   showSymbol?: boolean
   /** When set with showSymbol, only these calendar days get a visible marker. */
   symbolDates?: string[]
+  /**
+   * Horizontal S/R overlays (`value` in same unit as series: € or %).
+   * `price` = cours absolu pour le tooltip ; `strength` 0..1 → line width.
+   */
+  levels?: Array<{
+    value: number
+    kind: 'support' | 'resistance'
+    strength: number
+    label?: string
+    /** Absolute quote for hover (e.g. 42,50 €) */
+    price?: number
+    currency?: string
+  }>
 }
 
 /** Calendar-day zoom window shared across charts (YYYY-MM-DD). */
@@ -138,15 +151,20 @@ export default function PortfolioChart({
     // Bake shared zoom so series/axis rebuilds keep the window (connect handles
     // live peer sync — do not re-apply zoom via React effects).
     const z = resolveZoomOnAxis(built.axisDates, zoomRangeRef.current)
+    // Only bake shared *time* zoom onto X dataZooms — never overwrite Y scale.
     const dataZoom = (
       built.option as { dataZoom: Array<Record<string, unknown>> }
-    ).dataZoom.map((dz) => ({
-      ...dz,
-      start: z.start,
-      end: z.end,
-      startValue: z.startValue,
-      endValue: z.endValue,
-    }))
+    ).dataZoom.map((dz) =>
+      isXAxisDataZoom(dz)
+        ? {
+            ...dz,
+            start: z.start,
+            end: z.end,
+            startValue: z.startValue,
+            endValue: z.endValue,
+          }
+        : dz,
+    )
     return { ...built.option, dataZoom }
   }, [series, stableMarkers, mode, axisDates])
 
@@ -202,8 +220,27 @@ export default function PortfolioChart({
   // Stable handlers — echarts-for-react rebinds when onEvents identity/contents change.
   const onEvents = useMemo(
     () => ({
-      datazoom: () => {
+      datazoom: (ev?: {
+        dataZoomId?: string
+        dataZoomIndex?: number
+        batch?: Array<{ dataZoomId?: string; dataZoomIndex?: number }>
+      }) => {
         if (suppressEmit.current > 0) return
+        // Ignore pure Y-scale zooms — they must not rewrite the shared time window.
+        type DzEv = { dataZoomId?: string; dataZoomIndex?: number }
+        const batch: DzEv[] = ev?.batch?.length
+          ? ev.batch
+          : [{ dataZoomId: ev?.dataZoomId, dataZoomIndex: ev?.dataZoomIndex }]
+        const onlyY =
+          batch.length > 0 &&
+          batch.every(
+            (b) =>
+              b.dataZoomId === 'yInside' ||
+              b.dataZoomId === 'ySlider' ||
+              b.dataZoomIndex === 2 ||
+              b.dataZoomIndex === 3,
+          )
+        if (onlyY) return
         const chart = chartRef.current?.getEchartsInstance()
         if (!chart) return
         const dates = axisDatesRef.current
@@ -220,6 +257,7 @@ export default function PortfolioChart({
           suppressEmit.current += 1
           try {
             applyZoomToChart(chart, dates, null)
+            resetYZoom(chart)
           } catch {
             // disposing
           }
@@ -367,6 +405,14 @@ function resolveZoomOnAxis(
   }
 }
 
+function isXAxisDataZoom(dz: Record<string, unknown>): boolean {
+  const id = dz.id
+  if (id === 'yInside' || id === 'ySlider') return false
+  // Y-only zoom: has yAxisIndex and no x category zoom
+  if (dz.yAxisIndex != null && dz.xAxisIndex == null) return false
+  return true
+}
+
 /** Apply zoom to inside + slider so the category abscissa refreshes on both charts. */
 function applyZoomToChart(
   chart: EChartsType,
@@ -374,37 +420,21 @@ function applyZoomToChart(
   range: ZoomRange | null,
 ) {
   const z = resolveZoomOnAxis(dates, range)
-  chart.setOption(
-    {
-      xAxis: { data: dates },
-      dataZoom: [
-        {
-          start: z.start,
-          end: z.end,
-          startValue: z.startValue,
-          endValue: z.endValue,
-        },
-        {
-          start: z.start,
-          end: z.end,
-          startValue: z.startValue,
-          endValue: z.endValue,
-        },
-      ],
-    },
-    { lazyUpdate: false },
-  )
   chart.dispatchAction({
     type: 'dataZoom',
     dataZoomIndex: 0,
     start: z.start,
     end: z.end,
+    startValue: z.startValue,
+    endValue: z.endValue,
   })
   chart.dispatchAction({
     type: 'dataZoom',
     dataZoomIndex: 1,
     start: z.start,
     end: z.end,
+    startValue: z.startValue,
+    endValue: z.endValue,
   })
   requestAnimationFrame(() => {
     try {
@@ -413,6 +443,17 @@ function applyZoomToChart(
       // ignore
     }
   })
+}
+
+function resetYZoom(chart: EChartsType) {
+  for (const id of ['yInside', 'ySlider'] as const) {
+    chart.dispatchAction({
+      type: 'dataZoom',
+      dataZoomId: id,
+      start: 0,
+      end: 100,
+    })
+  }
 }
 
 function rangeFromDataZoom(
@@ -478,17 +519,20 @@ function readZoomRange(
   try {
     const opt = chart.getOption() as {
       dataZoom?: Array<{
+        id?: string
         startValue?: unknown
         endValue?: unknown
         start?: unknown
         end?: unknown
       }>
     }
-    const raw = opt.dataZoom?.[0]
-    if (!raw) return null
-    // getOption may nest dataZoom entries
-    const dz = Array.isArray(raw) ? raw[0] : raw
-    return rangeFromDataZoom(dz ?? {}, dates, periodRange)
+    const list = (opt.dataZoom ?? []).map((raw) =>
+      Array.isArray(raw) ? raw[0] : raw,
+    )
+    const dz =
+      list.find((d) => d?.id === 'xInside' || d?.id === 'xSlider') ?? list[0]
+    if (!dz) return null
+    return rangeFromDataZoom(dz, dates, periodRange)
   } catch {
     return null
   }
@@ -748,6 +792,80 @@ function buildOption(
             data: markData as object[],
           }
         : undefined,
+      markLine:
+        s.levels && s.levels.length
+          ? {
+              symbol: 'none',
+              animation: false,
+              emphasis: { label: { show: true } },
+              tooltip: {
+                show: true,
+                trigger: 'item',
+                formatter: (params: {
+                  name?: string
+                  data?: {
+                    vfKind?: string
+                    vfPrice?: number
+                    vfPct?: number
+                    vfCurrency?: string
+                    value?: number
+                  }
+                }) => {
+                  const d = params.data
+                  const isSup = d?.vfKind === 'support'
+                  const kind = isSup ? 'Support' : 'Résistance'
+                  const cur = (d?.vfCurrency || s.currency || 'EUR').toUpperCase()
+                  const price =
+                    d?.vfPrice != null && Number.isFinite(d.vfPrice)
+                      ? formatMoney(d.vfPrice, cur)
+                      : null
+                  const pct =
+                    d?.vfPct != null && Number.isFinite(d.vfPct)
+                      ? `${d.vfPct > 0 ? '+' : ''}${d.vfPct.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
+                      : null
+                  const lines = [
+                    `<div style="font-weight:600;margin-bottom:4px">${kind}</div>`,
+                  ]
+                  if (price) {
+                    lines.push(
+                      `<div>Cours du niveau : <b>${price}</b></div>`,
+                    )
+                  }
+                  if (pct) {
+                    lines.push(
+                      `<div class="muted">vs 1ᵉʳ achat : ${pct}</div>`,
+                    )
+                  }
+                  return `<div style="min-width:140px">${lines.join('')}</div>`
+                },
+              },
+              label: {
+                show: true,
+                position: 'insideEndTop',
+                fontSize: 10,
+                color: THEME.muted,
+                formatter: (p: { name?: string }) => p.name || '',
+              },
+              data: s.levels.map((lv) => {
+                const isSup = lv.kind === 'support'
+                const w = 1 + lv.strength * 3
+                return {
+                  name: lv.label ?? (isSup ? 'S' : 'R'),
+                  yAxis: lv.value,
+                  vfKind: lv.kind,
+                  vfPrice: lv.price,
+                  vfPct: lv.value,
+                  vfCurrency: lv.currency ?? s.currency,
+                  lineStyle: {
+                    type: 'solid' as const,
+                    width: w,
+                    color: isSup ? THEME.ok : THEME.danger,
+                    opacity: 0.55 + lv.strength * 0.35,
+                  },
+                }
+              }),
+            }
+          : undefined,
     }
   })
 
@@ -768,8 +886,13 @@ function buildOption(
       iconStyle: { borderColor: THEME.muted },
       feature: {
         dataZoom: {
-          yAxisIndex: 'none',
-          title: { zoom: 'Zoom zone', back: 'Annuler zoom' },
+          // Include primary Y so a drag-rectangle can tighten % / € scale
+          xAxisIndex: 0,
+          yAxisIndex: 0,
+          title: {
+            zoom: 'Zoom zone (temps + échelle)',
+            back: 'Annuler zoom',
+          },
         },
         restore: { title: 'Réinitialiser' },
       },
@@ -839,6 +962,29 @@ function buildOption(
           if (day) onPointerDate?.(calendarDay(day))
           return buildDayTooltipHtml(day)
         }
+        if (first.componentType === 'markLine') {
+          const d = first.data as {
+            vfKind?: string
+            vfPrice?: number
+            vfPct?: number
+            vfCurrency?: string
+          }
+          const isSup = d?.vfKind === 'support'
+          const kind = isSup ? 'Support' : 'Résistance'
+          const cur = (d?.vfCurrency || 'EUR').toUpperCase()
+          const price =
+            d?.vfPrice != null && Number.isFinite(d.vfPrice)
+              ? formatMoney(d.vfPrice, cur)
+              : null
+          const pct =
+            d?.vfPct != null && Number.isFinite(d.vfPct)
+              ? `${d.vfPct > 0 ? '+' : ''}${d.vfPct.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
+              : null
+          const bits = [`<div style="font-weight:600;margin-bottom:4px">${kind}</div>`]
+          if (price) bits.push(`<div>Cours du niveau : <b>${price}</b></div>`)
+          if (pct) bits.push(`<div style="opacity:.75">vs 1ᵉʳ achat : ${pct}</div>`)
+          return `<div style="min-width:140px">${bits.join('')}</div>`
+        }
         const date = String(first.axisValue ?? '').replace('·abo', '')
         if (date) onPointerDate?.(calendarDay(date))
         return buildDayTooltipHtml(date, list)
@@ -853,7 +999,7 @@ function buildOption(
       itemHeight: 3,
     },
     grid: {
-      left: 55,
+      left: 72,
       right: series.some((s) => s.yAxisIndex === 1) ? 52 : 24,
       top: 52,
       bottom: 72,
@@ -861,6 +1007,7 @@ function buildOption(
     dataZoom: [
       {
         type: 'inside',
+        id: 'xInside',
         xAxisIndex: 0,
         filterMode: 'none',
         start: 0,
@@ -873,6 +1020,7 @@ function buildOption(
       },
       {
         type: 'slider',
+        id: 'xSlider',
         xAxisIndex: 0,
         filterMode: 'none',
         start: 0,
@@ -889,6 +1037,39 @@ function buildOption(
           lineStyle: { color: ACCENT(0.4) },
           areaStyle: { color: ACCENT(0.08) },
         },
+      },
+      // Primary Y scale (%, €) — drag the left slider or Shift+wheel on the chart
+      {
+        type: 'inside',
+        id: 'yInside',
+        yAxisIndex: 0,
+        filterMode: 'none',
+        start: 0,
+        end: 100,
+        zoomOnMouseWheel: 'shift',
+        moveOnMouseMove: true,
+        moveOnMouseWheel: 'shift',
+        throttle: 50,
+      },
+      {
+        type: 'slider',
+        id: 'ySlider',
+        yAxisIndex: 0,
+        filterMode: 'none',
+        start: 0,
+        end: 100,
+        width: 16,
+        left: 8,
+        top: 52,
+        bottom: 72,
+        borderColor: LINE(0.18),
+        backgroundColor: LINE(0.04),
+        fillerColor: ACCENT(0.16),
+        handleStyle: { color: THEME.accent },
+        moveHandleStyle: { color: ACCENT(0.5) },
+        textStyle: { color: THEME.muted, fontSize: 9 },
+        showDetail: false,
+        brushSelect: false,
       },
     ],
     xAxis: {

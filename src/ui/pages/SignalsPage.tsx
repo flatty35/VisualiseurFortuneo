@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { EnvelopeType } from '@/domain/types'
 import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import {
@@ -11,6 +12,10 @@ import type { SignalLabel } from '@/engine/signalScore'
 import { ensureHistoricalSupports } from '@/import/ensureHistoricalSupports'
 import { getAllQuoteMaps } from '@/quotes/localQuoteCache'
 import { useAsyncData } from '@/ui/hooks/useLiveQuery'
+import {
+  MacdHistSparkline,
+  PriceSparkline,
+} from '@/ui/components/Sparklines'
 
 type Scope = EnvelopeType | 'ALL'
 type SortKey = 'score' | 'name' | 'rsi'
@@ -131,7 +136,9 @@ export default function SignalsPage() {
       else if (sortKey === 'rsi')
         cmp = (a.indicators.rsi ?? -1) - (b.indicators.rsi ?? -1)
       else cmp = a.name.localeCompare(b.name, 'fr')
-      return sortAsc ? cmp : -cmp
+      if (cmp !== 0) return sortAsc ? cmp : -cmp
+      // Tie-break: always alphabetical by name (A→Z), independent of primary direction
+      return a.name.localeCompare(b.name, 'fr')
     })
     return list
   }, [data, sortKey, sortAsc])
@@ -140,18 +147,54 @@ export default function SignalsPage() {
     if (sortKey === key) setSortAsc((v) => !v)
     else {
       setSortKey(key)
+      // Name → A→Z first; RSI / score → high→low first
       setSortAsc(key === 'name')
     }
   }
+
+  const sortMark = (key: SortKey) => {
+    if (sortKey !== key) return ''
+    return sortAsc ? ' ↑' : ' ↓'
+  }
+
+  const sortHeader = (key: SortKey, label: string) => (
+    <th
+      aria-sort={
+        sortKey !== key
+          ? 'none'
+          : sortAsc
+            ? 'ascending'
+            : 'descending'
+      }
+    >
+      <button
+        type="button"
+        className={`signals-sort-btn${sortKey === key ? ' active' : ''}`}
+        onClick={() => toggleSort(key)}
+        title={
+          sortKey === key
+            ? sortAsc
+              ? 'Tri croissant — cliquer pour inverser'
+              : 'Tri décroissant — cliquer pour inverser'
+            : `Trier par ${label}`
+        }
+      >
+        {label}
+        <span className="signals-sort-mark" aria-hidden>
+          {sortMark(key)}
+        </span>
+      </button>
+    </th>
+  )
 
   return (
     <div>
       <section className="panel">
         <h1 style={{ marginTop: 0 }}>Signaux</h1>
         <p className="muted">
-          Score technique sur les positions ouvertes (MM19/49/190, RSI, pivots
-          S/R, volume, ATR). Survolez ou touchez le score pour les raisons pour
-          / contre.
+          Score technique sur les positions ouvertes (MM19/49/190, RSI, MACD,
+          pivots S/R, volume, ATR). Cliquez Titre / RSI / Score pour trier.
+          Survolez le score pour les raisons pour / contre.
         </p>
 
         <label
@@ -193,37 +236,21 @@ export default function SignalsPage() {
           <table className="data signals-table">
             <thead>
               <tr>
-                <th>
-                  <button
-                    type="button"
-                    className="linkish"
-                    onClick={() => toggleSort('name')}
-                  >
-                    Titre
-                  </button>
-                </th>
+                {sortHeader('name', 'Titre')}
+                <th title="Cours ~2 ans (cache local)">2A</th>
                 {scope === 'ALL' && <th>Enveloppe</th>}
                 <th>Cours</th>
                 <th>Régime</th>
-                <th>
-                  <button
-                    type="button"
-                    className="linkish"
-                    onClick={() => toggleSort('rsi')}
-                  >
-                    RSI
-                  </button>
+                {sortHeader('rsi', 'RSI')}
+                {sortHeader('score', 'Score')}
+                <th title="Histogramme MACD ~3 mois (vert = hausse, rouge = baisse)">
+                  MACD
                 </th>
-                <th>
-                  <button
-                    type="button"
-                    className="linkish"
-                    onClick={() => toggleSort('score')}
-                  >
-                    Score
-                  </button>
+                <th
+                  title="Niveaux indicatifs basés sur la volatilité (ATR) : stop de protection ≈ cours − 2×ATR, objectif ≈ cours + 3×ATR. Ce n’est pas un ordre automatique."
+                >
+                  Stop / Objectif
                 </th>
-                <th>SL / TP</th>
                 <th>Vol.</th>
               </tr>
             </thead>
@@ -232,17 +259,32 @@ export default function SignalsPage() {
                 const cur = r.quoteCurrency || 'EUR'
                 const open = openScoreIsin === r.isin
                 return (
-                  <tr key={`${r.envelope}:${r.isin}`}>
+                  <tr key={r.isin}>
                     <td>
-                      <div className="signal-title">{r.name}</div>
+                      <Link
+                        className="signal-title"
+                        to={`/charts?${new URLSearchParams({
+                          isin: r.isin,
+                          envelope:
+                            scope !== 'ALL'
+                              ? scope
+                              : (r.envelopes[0] ?? 'ALL'),
+                        }).toString()}`}
+                        title="Voir le graphique de ce titre"
+                      >
+                        {r.name}
+                      </Link>
                       <code className="muted" style={{ fontSize: '0.75rem' }}>
                         {r.isin.length > 18 ? `${r.isin.slice(0, 16)}…` : r.isin}
                       </code>
                     </td>
+                    <td className="spark-cell">
+                      <PriceSparkline points={r.sparkPoints} />
+                    </td>
                     {scope === 'ALL' && (
                       <td>
                         <span className="badge muted">
-                          {envelopeLabel(r.envelope)}
+                          {r.envelopes.map(envelopeLabel).join(' · ')}
                         </span>
                       </td>
                     )}
@@ -334,10 +376,20 @@ export default function SignalsPage() {
                         </div>
                       )}
                     </td>
-                    <td>
+                    <td className="spark-cell">
+                      <MacdHistSparkline bars={r.macdHist} />
+                    </td>
+                    <td
+                      title={
+                        r.indicators.stopLoss !== undefined &&
+                        r.indicators.takeProfit !== undefined
+                          ? `Stop (protection) ${fmtPx(r.indicators.stopLoss, cur)} · Objectif ${fmtPx(r.indicators.takeProfit, cur)} — calcul ATR, indicatif`
+                          : undefined
+                      }
+                    >
                       {r.indicators.stopLoss !== undefined &&
                       r.indicators.takeProfit !== undefined
-                        ? `${fmtPx(r.indicators.stopLoss, cur)} / ${fmtPx(r.indicators.takeProfit, cur)}`
+                        ? `${fmtPx(r.indicators.stopLoss, cur)} → ${fmtPx(r.indicators.takeProfit, cur)}`
                         : '—'}
                     </td>
                     <td>{volLabel(r.indicators.volumeConfirm)}</td>

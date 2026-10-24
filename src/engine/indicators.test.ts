@@ -4,6 +4,7 @@ import {
   atrSeries,
   computeIndicators,
   findPivotLows,
+  macdSeries,
   rsiSeries,
   smaAt,
   volumeConfirmAt,
@@ -73,7 +74,19 @@ describe('indicators', () => {
     expect(ind!.regime).toBe('bull')
     expect(ind!.rsi).toBeDefined()
     expect(ind!.atr).toBeDefined()
+    expect(ind!.macd).toBeDefined()
+    expect(ind!.macdSignal).toBeDefined()
+    expect(ind!.macdHist).toBeDefined()
     expect(ind!.stopLoss).toBeLessThan(ind!.lastClose)
     expect(ind!.takeProfit).toBeGreaterThan(ind!.lastClose)
+  })
+
+  it('computes MACD line and signal', () => {
+    const bars = closes(80, 100, 0.2)
+    const m = macdSeries(bars.map((b) => b.close))
+    const last = m[m.length - 1]
+    expect(last.macd).toBeDefined()
+    expect(last.signal).toBeDefined()
+    expect(last.hist).toBeDefined()
   })
 })

@@ -49,5 +49,31 @@ describe('scoreOpenPositions', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].isin).toBe('FR0000120073')
     expect(rows[0].signal.score).toBeTypeOf('number')
+    expect(rows[0].sparkPoints.length).toBeGreaterThan(10)
+    expect(rows[0].sparkPoints[0].date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(rows[0].macdHist.length).toBeGreaterThan(5)
+  })
+
+  it('merges the same ISIN held in several envelopes into one row', () => {
+    const supports: Support[] = [
+      {
+        isin: 'FR0013416716',
+        name: 'Amundi Gold',
+        manualPrices: [],
+        yahooTicker: 'GOLD.PA',
+      },
+    ]
+    const quotes = new Map<string, QuoteBar[]>([['GOLD.PA', risingBars(220)]])
+    const rows = scoreOpenPositions({
+      positions: [
+        { isin: 'FR0013416716', quantity: 3, envelope: 'PEA' },
+        { isin: 'FR0013416716', quantity: 2, envelope: 'CTO' },
+      ],
+      supports,
+      quotes,
+    })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].quantity).toBe(5)
+    expect(rows[0].envelopes.sort()).toEqual(['CTO', 'PEA'])
   })
 })

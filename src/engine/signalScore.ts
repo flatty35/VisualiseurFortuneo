@@ -90,6 +90,13 @@ export function scoreFromIndicators(ind: IndicatorSnapshot): SignalScore {
     score += 20
   }
 
+  if (ind.macdBullCross) {
+    reasonsFor.push({ label: 'MACD croise au-dessus du signal', points: 15 })
+    score += 15
+  } else if (ind.macdHist !== undefined && ind.macdHist > 0 && !ind.macdBearCross) {
+    reasonsInfo.push({ label: 'MACD histogramme positif', points: 0 })
+  }
+
   if (ind.rsiReclaimBelow70) {
     reasonsAgainst.push({ label: 'RSI réintégré sous 70 (surachat)', points: -30 })
     score -= 30
@@ -97,6 +104,12 @@ export function scoreFromIndicators(ind: IndicatorSnapshot): SignalScore {
   if (ind.deathCross) {
     reasonsAgainst.push({ label: 'Death cross MM49 / MM190', points: -25 })
     score -= 25
+  }
+  if (ind.macdBearCross) {
+    reasonsAgainst.push({ label: 'MACD croise sous le signal', points: -15 })
+    score -= 15
+  } else if (ind.macdHist !== undefined && ind.macdHist < 0 && !ind.macdBullCross) {
+    reasonsInfo.push({ label: 'MACD histogramme négatif', points: 0 })
   }
   if (ind.breakSupport) {
     reasonsAgainst.push({ label: 'Cassure du support pivot', points: -35 })

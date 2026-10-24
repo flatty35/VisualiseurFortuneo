@@ -90,6 +90,76 @@ describe('buildPriceCompareSeries', () => {
     expect(series[0]?.values[0]).toBeCloseTo(0, 5)
     expect(series[0]?.values.at(-1)).toBeCloseTo(10, 5)
   })
+
+  it('draws a dashed pre-buy segment then a solid held segment', () => {
+    const support: Support = {
+      isin: 'FR0000125486',
+      name: 'VINCI',
+      yahooTicker: 'VNC.PA',
+      manualPrices: [],
+    }
+    const quotes = new Map<string, QuoteBar[]>([
+      [
+        'VNC.PA',
+        [
+          { date: '2024-01-01', close: 90 },
+          { date: '2024-01-02', close: 100 },
+          { date: '2024-01-03', close: 105 },
+        ],
+      ],
+    ])
+    const operations: Operation[] = [
+      {
+        id: '1',
+        fingerprint: '1',
+        envelope: 'PEA',
+        date: '2024-01-02',
+        type: 'ACHAT',
+        isin: 'FR0000125486',
+        quantity: 1,
+        price: 100,
+        label: 'achat',
+      },
+    ]
+    const holdings: HoldingsSnapshot[] = [
+      {
+        date: '2024-01-01',
+        quantities: new Map(),
+        cash: 0,
+      },
+      {
+        date: '2024-01-02',
+        quantities: new Map([['FR0000125486', 1]]),
+        cash: 0,
+      },
+      {
+        date: '2024-01-03',
+        quantities: new Map([['FR0000125486', 1]]),
+        cash: 0,
+      },
+    ]
+    const series = buildPriceCompareSeries({
+      isins: ['FR0000125486'],
+      holdings,
+      supports: [support],
+      quotes,
+      operations,
+      names: { FR0000125486: 'VINCI' },
+      from: '2024-01-01',
+      to: '2024-01-03',
+    })
+    expect(series.length).toBeGreaterThanOrEqual(2)
+    const pre = series[0]
+    const held = series[1]
+    expect(pre.dashed).toBe(true)
+    expect(pre.dates[0]).toBe('2024-01-01')
+    expect(pre.values[0]).toBeCloseTo(-10, 5) // 90 vs base 100
+    expect(held.dashed).toBe(false)
+    expect(held.showInLegend).toBe(true)
+    expect(held.values.some((v) => v === 0 || (typeof v === 'number' && Math.abs(v) < 1e-9))).toBe(
+      true,
+    )
+  })
 })
 
 describe('buildPruStepSeries', () => {

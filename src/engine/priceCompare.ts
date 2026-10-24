@@ -3,7 +3,7 @@ import type { HoldingsSnapshot } from './positions'
 import type { ChartSeries } from '@/ui/components/PortfolioChart'
 import { SERIES_PALETTE, THEME } from '@/ui/theme'
 import { feesInQuoteCurrency } from './markers'
-import { priceOnDate } from './valuation'
+import { priceOnDate, quoteKeyForSupport } from './valuation'
 
 const PALETTE = SERIES_PALETTE
 
@@ -73,11 +73,28 @@ export function splitHeldSegments(points: Pt[]): { held: boolean; points: Pt[] }
 
 /**
  * Price comparison in % vs first buy (0 % at first purchase).
- * Solid while net qty > 0, dashed while flat — segments join at boundaries.
+ * Solid while net qty > 0; dashed while flat — including **before** the first
+ * buy and after a full exit. Segments join at boundaries.
  */
 export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[] {
   const { holdings, from, to } = input
-  const days = holdings.map((h) => h.date).filter((d) => d >= from && d <= to)
+  const daySet = new Set(
+    holdings.map((h) => h.date).filter((d) => d >= from && d <= to),
+  )
+  // Quote sessions before the holdings calendar (pre-first-trade) so the
+  // dashed pre-buy segment can extend left of the first portfolio day.
+  for (const isin of input.isins) {
+    const support = input.supports.find((s) => s.isin === isin)
+    if (!support) continue
+    const key = quoteKeyForSupport(support)
+    const bars =
+      (key ? input.quotes.get(key) : undefined) ?? input.quotes.get(support.isin)
+    if (!bars) continue
+    for (const b of bars) {
+      if (b.date >= from && b.date <= to) daySet.add(b.date)
+    }
+  }
+  const days = [...daySet].sort()
   if (!days.length) return []
 
   const qtyByDay = new Map<string, Map<string, number>>()
@@ -104,15 +121,13 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
       )?.price
     if (!basePx || basePx === 0) return
 
-    // Points from first buy (0 %); shared axisDates pads earlier period days with null.
-    const start = buyDate > from ? buyDate : from
+    // Full window: pre-buy + held + post-exit (dashed / solid / dashed).
     const points: Pt[] = []
     for (const day of days) {
-      if (day < start) continue
       const px = priceOnDate(day, support, input.quotes)
       if (px === undefined) continue
       const qty = qtyByDay.get(day)?.get(isin) ?? 0
-      const held = Math.abs(qty) > 1e-8
+      const held = day >= buyDate && Math.abs(qty) > 1e-8
       points.push({
         date: day,
         value: (px / basePx - 1) * 100,
@@ -125,6 +140,11 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
 
     const color = PALETTE[colorIdx % PALETTE.length]
     const segments = splitHeldSegments(points)
+    // Legend on first *held* segment when possible (pre-buy dash alone is easy to miss)
+    const legendSegIdx = Math.max(
+      0,
+      segments.findIndex((s) => s.held),
+    )
     segments.forEach((seg, segIdx) => {
       if (seg.points.length < 1) return
       out.push({
@@ -137,7 +157,7 @@ export function buildPriceCompareSeries(input: PriceCompareInput): ChartSeries[]
         dashed: !seg.held,
         color,
         valueUnit: 'pct',
-        showInLegend: segIdx === 0,
+        showInLegend: segIdx === legendSegIdx,
         connectGroup: isin,
       })
     })

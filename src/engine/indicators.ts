@@ -8,6 +8,9 @@ export const ATR_PERIOD = 14
 export const VOL_SMA_PERIOD = 19
 export const PIVOT_K = 2
 export const SLOPE_LOOKBACK = 19
+export const MACD_FAST = 12
+export const MACD_SLOW = 26
+export const MACD_SIGNAL = 9
 
 export type TrendRegime = 'bull' | 'bear' | 'neutral'
 
@@ -15,6 +18,15 @@ export interface PivotLevel {
   index: number
   date: string
   price: number
+}
+
+/** Support / resistance for chart overlays (volume → line weight). */
+export interface SrLevel {
+  price: number
+  kind: 'support' | 'resistance'
+  date: string
+  /** 0..1 — higher when pivot day volume ≫ average */
+  strength: number
 }
 
 export interface IndicatorSnapshot {
@@ -41,6 +53,12 @@ export interface IndicatorSnapshot {
   takeProfit?: number
   /** true = volume spike; false = weak; undefined = unknown */
   volumeConfirm?: boolean
+  /** MACD(12,26,9) */
+  macd?: number
+  macdSignal?: number
+  macdHist?: number
+  macdBullCross: boolean
+  macdBearCross: boolean
 }
 
 function barLow(b: QuoteBar): number {
@@ -67,6 +85,72 @@ export function smaAt(
 export function smaSeries(closes: number[], period: number): Array<number | undefined> {
   const out: Array<number | undefined> = new Array(closes.length)
   for (let i = 0; i < closes.length; i++) out[i] = smaAt(closes, i, period)
+  return out
+}
+
+/** EMA series (seed = SMA of first `period` closes). */
+export function emaSeries(
+  closes: number[],
+  period: number,
+): Array<number | undefined> {
+  const out: Array<number | undefined> = new Array(closes.length)
+  if (closes.length < period || period <= 0) return out
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += closes[i]
+  let ema = sum / period
+  out[period - 1] = ema
+  const k = 2 / (period + 1)
+  for (let i = period; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k)
+    out[i] = ema
+  }
+  return out
+}
+
+export interface MacdPoint {
+  macd?: number
+  signal?: number
+  hist?: number
+}
+
+/** Classic MACD(12,26,9) on closes. */
+export function macdSeries(
+  closes: number[],
+  fast = MACD_FAST,
+  slow = MACD_SLOW,
+  signalPeriod = MACD_SIGNAL,
+): MacdPoint[] {
+  const out: MacdPoint[] = closes.map(() => ({}))
+  const emaFast = emaSeries(closes, fast)
+  const emaSlow = emaSeries(closes, slow)
+  const macdLine: Array<number | undefined> = new Array(closes.length)
+  for (let i = 0; i < closes.length; i++) {
+    if (emaFast[i] !== undefined && emaSlow[i] !== undefined) {
+      macdLine[i] = emaFast[i]! - emaSlow[i]!
+    }
+  }
+  // Signal = EMA of MACD values (skip leading undefined)
+  const macdVals: number[] = []
+  const macdIdx: number[] = []
+  for (let i = 0; i < macdLine.length; i++) {
+    if (macdLine[i] === undefined) continue
+    macdVals.push(macdLine[i]!)
+    macdIdx.push(i)
+  }
+  const signalOnPacked = emaSeries(macdVals, signalPeriod)
+  const signalLine: Array<number | undefined> = new Array(closes.length)
+  for (let j = 0; j < macdIdx.length; j++) {
+    signalLine[macdIdx[j]] = signalOnPacked[j]
+  }
+  for (let i = 0; i < closes.length; i++) {
+    const m = macdLine[i]
+    const s = signalLine[i]
+    out[i] = {
+      macd: m,
+      signal: s,
+      hist: m !== undefined && s !== undefined ? m - s : undefined,
+    }
+  }
   return out
 }
 
@@ -194,6 +278,125 @@ export function activeResistance(
 ): PivotLevel | undefined {
   const above = pivots.filter((p) => p.price >= price * 0.999)
   return above.length ? above[above.length - 1] : undefined
+}
+
+/**
+ * Recent pivot S/R levels with volume-based strength (for chart markLines).
+ * Caps count to avoid clutter; prefers levels near the last close.
+ */
+export function listSrLevels(
+  bars: QuoteBar[],
+  opts?: { maxEach?: number; nearPct?: number },
+): SrLevel[] {
+  if (bars.length < PIVOT_K * 2 + 5) return []
+  const maxEach = opts?.maxEach ?? 4
+  const nearPct = opts?.nearPct ?? 0.2
+  const last = bars.length - 1
+  const lastClose = bars[last].close
+  if (!(lastClose > 0)) return []
+
+  const volAt = (i: number): number | undefined => {
+    const v = bars[i].volume
+    return v !== undefined && Number.isFinite(v) && v >= 0 ? v : undefined
+  }
+  let volSum = 0
+  let volN = 0
+  for (let i = Math.max(0, last - VOL_SMA_PERIOD + 1); i <= last; i++) {
+    const v = volAt(i)
+    if (v !== undefined) {
+      volSum += v
+      volN++
+    }
+  }
+  const volAvg = volN > 0 ? volSum / volN : undefined
+
+  const strengthOf = (i: number): number => {
+    const v = volAt(i)
+    if (v === undefined || volAvg === undefined || !(volAvg > 0)) return 0.35
+    const ratio = v / volAvg
+    // 0.5× avg → ~0.15 ; 1× → 0.4 ; 1.5× → 0.7 ; 3× → 1
+    return Math.max(0.12, Math.min(1, (ratio - 0.3) / 2.2))
+  }
+
+  const near = (price: number) =>
+    Math.abs(price - lastClose) / lastClose <= nearPct
+
+  const lows = findPivotLows(bars)
+    .filter((p) => p.price <= lastClose * 1.002 && near(p.price))
+    .slice(-maxEach * 2)
+  const highs = findPivotHighs(bars)
+    .filter((p) => p.price >= lastClose * 0.998 && near(p.price))
+    .slice(-maxEach * 2)
+
+  const supports: SrLevel[] = lows
+    .map((p) => ({
+      price: p.price,
+      kind: 'support' as const,
+      date: p.date,
+      strength: strengthOf(p.index),
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, maxEach)
+
+  const resistances: SrLevel[] = highs
+    .map((p) => ({
+      price: p.price,
+      kind: 'resistance' as const,
+      date: p.date,
+      strength: strengthOf(p.index),
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, maxEach)
+
+  return [...supports, ...resistances]
+}
+
+/** Downsample closes for sparklines (keeps first/last). */
+export function downsampleCloses(
+  closes: number[],
+  maxPoints: number,
+): number[] {
+  return downsampleSparkPoints(
+    closes.map((close, i) => ({ date: String(i), close })),
+    maxPoints,
+  ).map((p) => p.close)
+}
+
+/** Downsample dated closes (keeps first/last) for labelled sparklines. */
+export function downsampleSparkPoints(
+  points: Array<{ date: string; close: number }>,
+  maxPoints: number,
+): Array<{ date: string; close: number }> {
+  if (points.length <= maxPoints || maxPoints < 3) return points
+  const out: Array<{ date: string; close: number }> = [points[0]]
+  const inner = maxPoints - 2
+  for (let i = 1; i <= inner; i++) {
+    const idx = Math.round((i * (points.length - 1)) / (inner + 1))
+    out.push(points[idx])
+  }
+  out.push(points[points.length - 1])
+  return out
+}
+
+/** Last ~`sessions` MACD histogram bars with rising/falling flag. */
+export function macdHistSpark(
+  closes: number[],
+  sessions = 63,
+): Array<{ v: number; rising: boolean }> {
+  const macd = macdSeries(closes)
+  const start = Math.max(0, macd.length - sessions)
+  const out: Array<{ v: number; rising: boolean }> = []
+  let prev: number | undefined
+  for (let i = start; i < macd.length; i++) {
+    const h = macd[i].hist
+    if (h === undefined) continue
+    out.push({
+      v: h,
+      rising: prev === undefined ? h >= 0 : h >= prev,
+    })
+    prev = h
+  }
+  return out
 }
 
 export function volumeConfirmAt(
@@ -334,6 +537,31 @@ export function computeIndicators(bars: QuoteBar[]): IndicatorSnapshot | null {
 
   const volumeConfirm = volumeConfirmAt(bars, last, VOL_SMA_PERIOD)
 
+  const macdArr = macdSeries(closes)
+  const macdNow = macdArr[last]
+  const macdPrev = last >= 1 ? macdArr[last - 1] : undefined
+  let macdBullCross = false
+  let macdBearCross = false
+  if (
+    macdNow?.macd !== undefined &&
+    macdNow.signal !== undefined &&
+    macdPrev?.macd !== undefined &&
+    macdPrev.signal !== undefined
+  ) {
+    macdBullCross = crossedUp(
+      macdPrev.macd,
+      macdNow.macd,
+      macdPrev.signal,
+      macdNow.signal,
+    )
+    macdBearCross = crossedDown(
+      macdPrev.macd,
+      macdNow.macd,
+      macdPrev.signal,
+      macdNow.signal,
+    )
+  }
+
   return {
     lastDate: bars[last].date,
     lastClose,
@@ -357,5 +585,10 @@ export function computeIndicators(bars: QuoteBar[]): IndicatorSnapshot | null {
     stopLoss,
     takeProfit,
     volumeConfirm,
+    macd: macdNow?.macd,
+    macdSignal: macdNow?.signal,
+    macdHist: macdNow?.hist,
+    macdBullCross,
+    macdBearCross,
   }
 }

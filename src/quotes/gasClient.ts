@@ -129,14 +129,22 @@ export async function fetchHistoryRange(
   return (data.bars ?? []).map(normalizeQuoteBar)
 }
 
+/** Tickers per GAS `historybulk` call — small enough for progress + fewer timeouts. */
+export const HISTORY_BULK_CHUNK = 10
+
 /**
- * Parallel Yahoo history for many tickers (one GAS round-trip, UrlFetchApp.fetchAll).
+ * Yahoo history in sequential chunks of {@link HISTORY_BULK_CHUNK}.
  * Falls back to per-ticker calls if the deployment has no `historybulk` yet.
  */
 export async function fetchHistoryBulk(
   tickers: string[],
   period1: string,
   period2: string,
+  onChunk?: (info: {
+    doneTickers: number
+    totalTickers: number
+    chunkSize: number
+  }) => void,
 ): Promise<Map<string, QuoteBar[]>> {
   const clean = [...new Set(tickers.map(assertSafeTicker))]
   const out = new Map<string, QuoteBar[]>()
@@ -145,42 +153,46 @@ export async function fetchHistoryBulk(
     throw new QuoteProxyError('Plage de dates invalide')
   }
 
-  const CHUNK = 40
   const slices: string[][] = []
-  for (let i = 0; i < clean.length; i += CHUNK) {
-    slices.push(clean.slice(i, i + CHUNK))
+  for (let i = 0; i < clean.length; i += HISTORY_BULK_CHUNK) {
+    slices.push(clean.slice(i, i + HISTORY_BULK_CHUNK))
   }
-  // Chunks are independent GAS executions → run them concurrently
-  await Promise.all(
-    slices.map(async (slice) => {
-      try {
-        const data = await gasGet<{
-          histories?: Record<string, QuoteBar[]>
-          error?: string
-        }>(
-          {
-            action: 'historybulk',
-            tickers: slice.join(','),
-            period1,
-            period2,
-          },
-          90_000,
-        )
-        for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
-          out.set(ticker, (bars ?? []).map(normalizeQuoteBar))
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        // Old GAS deploy without historybulk
-        if (!/Action inconnue|historybulk/i.test(msg)) throw e
-        const settled = await mapPool(slice, 6, async (t) => {
-          const bars = await fetchHistoryRange(t, period1, period2)
-          return [t, bars] as const
-        })
-        for (const [t, bars] of settled) out.set(t, bars)
+
+  let doneTickers = 0
+  for (const slice of slices) {
+    try {
+      const data = await gasGet<{
+        histories?: Record<string, QuoteBar[]>
+        error?: string
+      }>(
+        {
+          action: 'historybulk',
+          tickers: slice.join(','),
+          period1,
+          period2,
+        },
+        90_000,
+      )
+      for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
+        out.set(ticker, (bars ?? []).map(normalizeQuoteBar))
       }
-    }),
-  )
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // Old GAS deploy without historybulk
+      if (!/Action inconnue|historybulk/i.test(msg)) throw e
+      const settled = await mapPool(slice, 6, async (t) => {
+        const bars = await fetchHistoryRange(t, period1, period2)
+        return [t, bars] as const
+      })
+      for (const [t, bars] of settled) out.set(t, bars)
+    }
+    doneTickers += slice.length
+    onChunk?.({
+      doneTickers,
+      totalTickers: clean.length,
+      chunkSize: slice.length,
+    })
+  }
   return out
 }
 

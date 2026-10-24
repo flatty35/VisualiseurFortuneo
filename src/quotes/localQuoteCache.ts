@@ -252,9 +252,9 @@ export async function refreshQuotesForSupports(
   }
   if (proxyPlans.length) {
     onProgress?.({
-      current: done + 1,
+      current: done,
       total,
-      ticker: `proxy ${proxyPlans.length} titre(s)…`,
+      ticker: `proxy 0/${proxyPlans.length}…`,
     })
     let histories = new Map<string, QuoteBar[]>()
     try {
@@ -262,6 +262,13 @@ export async function refreshQuotesForSupports(
         proxyPlans.map((p) => p.yahooTicker!),
         start,
         end,
+        (chunk) => {
+          onProgress?.({
+            current: Math.min(total, done + chunk.doneTickers),
+            total,
+            ticker: `proxy ${chunk.doneTickers}/${chunk.totalTickers}…`,
+          })
+        },
       )
     } catch {
       // Singles below

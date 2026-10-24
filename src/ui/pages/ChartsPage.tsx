@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import type { ChartPeriod, EnvelopeType, VirtualOpening } from '@/domain/types'
 import { ALL_ENVELOPES, envelopeLabel } from '@/domain/envelopes'
 import {
@@ -12,6 +13,7 @@ import { buildOperationMarkers } from '@/engine/markers'
 import {
   buildPriceCompareSeries,
   buildPruStepSeries,
+  firstBuyDate,
 } from '@/engine/priceCompare'
 import {
   computeCalendarYearTris,
@@ -27,10 +29,12 @@ import {
 import {
   clipInactivePositionValues,
   mergeValuedSeries,
+  priceOnDate,
   quoteKeyForSupport,
   sliceByPeriod,
   valueHoldingsSeries,
 } from '@/engine/valuation'
+import { listSrLevels } from '@/engine/indicators'
 import {
   getAllQuoteMaps,
   refreshQuotesForSupports,
@@ -119,6 +123,7 @@ function historyStartForScope(
 }
 
 export default function ChartsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [tab, setTab] = useState<ChartsTab>('historique')
   const [envelope, setEnvelope] = useState<ChartScope>('PEA')
   const [period, setPeriod] = useState<ChartPeriod>('2Y')
@@ -126,12 +131,38 @@ export default function ChartsPage() {
   const [pickerFilter, setPickerFilter] = useState('')
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [showSrLevels, setShowSrLevels] = useState(false)
+  const [showPru, setShowPru] = useState(true)
+  const [showTri, setShowTri] = useState(true)
   const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null)
   /** Date sous le curseur (onglet Valorisation) — défaut = fin de période. */
   const [pointerDate, setPointerDate] = useState<string | null>(null)
   const autoRefreshDone = useRef(false)
   /** Full category axis (updated when the chart model rebuilds). */
   const axisDatesRef = useRef<string[]>([])
+  /** Deep-link from Signaux — applied once the matching envelope's picker is ready. */
+  const pendingSelectRef = useRef<{
+    isin: string
+    envelope?: ChartScope
+  } | null>(null)
+
+  // Deep-link: /charts?isin=…&envelope=… (from Signaux)
+  useEffect(() => {
+    const raw = searchParams.get('isin')?.trim()
+    if (!raw) return
+    const envRaw = searchParams.get('envelope')?.trim()
+    let env: ChartScope | undefined
+    if (
+      envRaw === 'ALL' ||
+      (envRaw && (ALL_ENVELOPES as string[]).includes(envRaw))
+    ) {
+      env = envRaw as ChartScope
+      setEnvelope(env)
+    }
+    pendingSelectRef.current = { isin: raw.toUpperCase(), envelope: env }
+    setTab('historique')
+    setSearchParams({}, { replace: true })
+  }, [searchParams, setSearchParams])
 
   /** Pastille = fenêtre de zoom initiale ; les séries gardent tout l’historique. */
   const applyPeriodZoom = (p: ChartPeriod, dates: string[]) => {
@@ -356,6 +387,85 @@ export default function ChartsPage() {
       for (const o of data.operations) {
         if (o.isin && o.name && !names[o.isin]) names[o.isin] = o.name
       }
+
+      // Cours axis: holdings calendar + up to 2Y of quotes before each first buy
+      // so the pre-position dashed segment is visible.
+      const priceDaySet = new Set(allDates)
+      for (const isin of selectedIsins) {
+        const support = data.supports.find((x) => x.isin === isin)
+        if (!support) continue
+        const key = quoteKeyForSupport(support)
+        const bars =
+          (key ? quotes.get(key) : undefined) ?? quotes.get(support.isin)
+        if (!bars?.length) continue
+        const buy = firstBuyDate(data.operations, isin)
+        let preFrom = fullFrom
+        if (buy) {
+          const d = new Date(`${buy}T00:00:00Z`)
+          d.setUTCFullYear(d.getUTCFullYear() - 2)
+          preFrom = d.toISOString().slice(0, 10)
+        }
+        for (const b of bars) {
+          if (b.date > fullTo || b.date < preFrom) continue
+          priceDaySet.add(b.date)
+        }
+      }
+      const priceAxisDates = [...priceDaySet].sort()
+      const priceFrom = priceAxisDates[0] ?? fullFrom
+
+      const srLevelsByIsin = new Map<
+        string,
+        NonNullable<ChartSeries['levels']>
+      >()
+      if (showSrLevels) {
+        for (const isin of selectedIsins) {
+          const support = data.supports.find((x) => x.isin === isin)
+          if (!support) continue
+          const key = quoteKeyForSupport(support)
+          const bars =
+            (key ? quotes.get(key) : undefined) ?? quotes.get(support.isin)
+          if (!bars?.length) continue
+          const buy = firstBuyDate(data.operations, isin)
+          if (!buy) continue
+          const basePx =
+            priceOnDate(buy, support, quotes) ??
+            data.operations.find(
+              (o) =>
+                o.isin === isin &&
+                o.price &&
+                (o.type === 'ACHAT' || o.type === 'SCRIPT'),
+            )?.price
+          if (!basePx || basePx === 0) continue
+          const cur = (support.quoteCurrency || 'EUR').toUpperCase()
+          srLevelsByIsin.set(
+            isin,
+            listSrLevels(bars).map((lv) => {
+              let priceLabel: string
+              try {
+                priceLabel = lv.price.toLocaleString('fr-FR', {
+                  style: 'currency',
+                  currency: cur,
+                  maximumFractionDigits: 2,
+                })
+              } catch {
+                priceLabel = `${lv.price.toLocaleString('fr-FR', { maximumFractionDigits: 2 })} ${cur}`
+              }
+              return {
+                value: (lv.price / basePx - 1) * 100,
+                kind: lv.kind,
+                strength: lv.strength,
+                label:
+                  lv.kind === 'support'
+                    ? `S ${priceLabel}`
+                    : `R ${priceLabel}`,
+                price: lv.price,
+                currency: cur,
+              }
+            }),
+          )
+        }
+      }
+
       const priceCompare: ChartSeries[] = buildPriceCompareSeries({
         isins: selectedIsins,
         names,
@@ -363,7 +473,7 @@ export default function ChartsPage() {
         quotes,
         operations: data.operations,
         holdings,
-        from: fullFrom,
+        from: priceFrom,
         to: fullTo,
       }).map((s) => {
         const isin = s.connectGroup || s.id.replace(/-seg\d+$/, '')
@@ -372,67 +482,76 @@ export default function ChartsPage() {
           ...s,
           isPosition: true,
           currency: support?.quoteCurrency || 'EUR',
+          // One markLine set per ISIN (on the legend segment)
+          levels:
+            s.showInLegend !== false
+              ? srLevelsByIsin.get(isin)
+              : undefined,
         }
       })
 
-      // Single selection: PRU step (same % scale) + monthly TRI on 2nd axis.
+      // Single selection: optional PRU step + monthly TRI on 2nd axis.
       if (selectedIsins.length === 1) {
         const isin = selectedIsins[0]
-        const pru = buildPruStepSeries({
-          isin,
-          operations: data.operations,
-          supports: data.supports,
-          quotes,
-          days: axisDates,
-          from: fullFrom,
-          to: fullTo,
-        })
-        if (pru) priceCompare.push(pru)
-
-        const valuedPos = valued.map((v) => ({
-          date: v.date,
-          total: v.byIsin[isin] ?? 0,
-        }))
-        const firstHeld = valuedPos.findIndex((v) => v.total > 1e-6)
-        const triValued =
-          firstHeld >= 0 ? valuedPos.slice(firstHeld) : []
-        if (triValued.length >= 2) {
-          const posStart = triValued[0].date
-          const posEnd = triValued[triValued.length - 1].date
-          const midFlows = listPositionTradeFlows({
-            operations: data.operations,
+        if (showPru) {
+          const pru = buildPruStepSeries({
             isin,
+            operations: data.operations,
             supports: data.supports,
             quotes,
-            from: posStart,
-            to: posEnd,
+            days: axisDates,
+            from: fullFrom,
+            to: fullTo,
           })
-          const posTriCurve = computeMonthlyTriSeries({
-            valued: triValued,
-            midFlows,
-          })
-          const posTriDense = densifyTriSeries(
-            posTriCurve,
-            triValued.map((v) => v.date),
-          )
-          priceCompare.push({
-            id: `${isin}-tri`,
-            name: 'TRI annualisé',
-            dates: posTriDense.map((p) => p.date),
-            values: posTriDense.map((p) =>
-              p.rate == null ? null : p.rate * 100,
-            ),
-            yAxisIndex: 1,
-            valueUnit: 'pct',
-            color: THEME.tri,
-            dashed: true,
-            showInLegend: true,
-            connectNulls: true,
-            showSymbol: true,
-            symbolDates: posTriCurve
-              .filter((p) => p.rate != null)
-              .map((p) => p.date),
-          })
+          if (pru) priceCompare.push(pru)
+        }
+
+        if (showTri) {
+          const valuedPos = valued.map((v) => ({
+            date: v.date,
+            total: v.byIsin[isin] ?? 0,
+          }))
+          const firstHeld = valuedPos.findIndex((v) => v.total > 1e-6)
+          const triValued =
+            firstHeld >= 0 ? valuedPos.slice(firstHeld) : []
+          if (triValued.length >= 2) {
+            const posStart = triValued[0].date
+            const posEnd = triValued[triValued.length - 1].date
+            const midFlows = listPositionTradeFlows({
+              operations: data.operations,
+              isin,
+              supports: data.supports,
+              quotes,
+              from: posStart,
+              to: posEnd,
+            })
+            const posTriCurve = computeMonthlyTriSeries({
+              valued: triValued,
+              midFlows,
+            })
+            const posTriDense = densifyTriSeries(
+              posTriCurve,
+              triValued.map((v) => v.date),
+            )
+            priceCompare.push({
+              id: `${isin}-tri`,
+              name: 'TRI annualisé',
+              dates: posTriDense.map((p) => p.date),
+              values: posTriDense.map((p) =>
+                p.rate == null ? null : p.rate * 100,
+              ),
+              yAxisIndex: 1,
+              valueUnit: 'pct',
+              color: THEME.tri,
+              dashed: true,
+              showInLegend: true,
+              connectNulls: true,
+              showSymbol: true,
+              symbolDates: posTriCurve
+                .filter((p) => p.rate != null)
+                .map((p) => p.date),
+            })
+          }
         }
       }
 
@@ -540,7 +659,9 @@ export default function ChartsPage() {
         isinList,
         scopeSupports,
         axisDates,
+        priceAxisDates,
         periodRange,
+        pricePeriodRange: { start: priceFrom, end: fullTo },
         tickersMapped,
         tickersCached,
         lastTotal: valued[valued.length - 1]?.total ?? 0,
@@ -562,7 +683,7 @@ export default function ChartsPage() {
       console.error('Charts model', e)
       return null
     }
-  }, [data, period, selectedIsins])
+  }, [data, period, selectedIsins, showSrLevels, showPru, showTri])
 
   // Keep axis dates for period-pill zoom; on first load / envelope reload open
   // the selected period window (data stays full-history so zoom-out can expand).
@@ -579,10 +700,25 @@ export default function ChartsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model?.axisDates])
 
+  // Apply deep-link selection once the target envelope's ISIN list is loaded.
+  useEffect(() => {
+    const pending = pendingSelectRef.current
+    const list = model?.isinList ?? []
+    if (!pending || !list.length || !data) return
+    if (pending.envelope && data.scope !== pending.envelope) return
+    if (loading) return
+    const match = list.find(
+      (x) => x.isin.toUpperCase() === pending.isin.toUpperCase(),
+    )
+    pendingSelectRef.current = null
+    if (match) setSelectedIsins([match.isin])
+  }, [model?.isinList, data, loading])
+
   // Drop selections that are not in the current envelope's ISIN list
   useEffect(() => {
     const allowed = new Set((model?.isinList ?? []).map((x) => x.isin))
     if (!allowed.size) return
+    if (pendingSelectRef.current) return
     setSelectedIsins((prev) => {
       const next = prev.filter((id) => allowed.has(id))
       return next.length === prev.length ? prev : next
@@ -1076,7 +1212,11 @@ export default function ChartsPage() {
                       type="button"
                       className={`charts-picker-item${on ? ' active' : ''}${closed ? ' closed' : ''}`}
                       onClick={() => toggleIsin(isin)}
-                      title={closed ? `${isin} (sorti)` : isin}
+                      title={
+                        closed
+                          ? `${isin} — ${name || isin} (sorti)`
+                          : `${isin} — ${name || isin}`
+                      }
                       aria-pressed={on}
                     >
                       <span className="charts-picker-check" aria-hidden>
@@ -1103,11 +1243,60 @@ export default function ChartsPage() {
               <div className="charts-panel-head">
                 <h2>Historique — Cours</h2>
                 <span className="muted">
-                  0 % au 1ᵉʳ achat · zoom sync
-                  {selectedIsins.length === 1
-                    ? ' · PRU (escalier) + TRI position'
-                    : ''}
+                  0 % au 1ᵉʳ achat · échelle % : curseur à gauche ou Maj+molette
                 </span>
+              </div>
+              <div
+                className="charts-overlay-toggles"
+                role="group"
+                aria-label="Options du graphique cours"
+              >
+                <label
+                  title="Traits horizontaux aux niveaux de prix pivots : vert = support, rouge = résistance ; plus épais si volume élevé ce jour-là"
+                >
+                  <input
+                    type="checkbox"
+                    checked={showSrLevels}
+                    onChange={(e) => setShowSrLevels(e.target.checked)}
+                  />
+                  Supports &amp; résistances
+                </label>
+                <label
+                  className={
+                    selectedIsins.length === 1 ? undefined : 'is-disabled'
+                  }
+                  title={
+                    selectedIsins.length === 1
+                      ? 'Prix de revient unitaire (escalier) en % depuis le 1ᵉʳ achat'
+                      : 'Disponible lorsqu’un seul titre est sélectionné'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={showPru}
+                    disabled={selectedIsins.length !== 1}
+                    onChange={(e) => setShowPru(e.target.checked)}
+                  />
+                  Prix de revient (PRU)
+                </label>
+                <label
+                  className={
+                    selectedIsins.length === 1 ? undefined : 'is-disabled'
+                  }
+                  title={
+                    selectedIsins.length === 1
+                      ? 'TRI annualisé de la position (axe de droite)'
+                      : 'Disponible lorsqu’un seul titre est sélectionné'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={showTri}
+                    disabled={selectedIsins.length !== 1}
+                    onChange={(e) => setShowTri(e.target.checked)}
+                  />
+                  TRI annualisé
+                </label>
               </div>
               {selectedIsins.length === 0 ? (
                 <p className="muted" style={{ margin: '0.5rem 0' }}>
@@ -1125,8 +1314,8 @@ export default function ChartsPage() {
                   period={period}
                   onPeriod={setPeriod}
                   showPeriodBar={false}
-                  axisDates={model.axisDates}
-                  periodRange={model.periodRange}
+                  axisDates={model.priceAxisDates}
+                  periodRange={model.pricePeriodRange}
                   zoomRange={zoomRange}
                   onZoomRangeChange={onZoomRangeChange}
                   height={380}
