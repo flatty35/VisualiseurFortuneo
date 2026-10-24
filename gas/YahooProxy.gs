@@ -153,11 +153,21 @@ function chartUrl_(ticker, period1, period2) {
   );
 }
 
+function numOrUndef_(v) {
+  if (v === null || v === undefined) return undefined;
+  var n = Number(v);
+  return isFinite(n) ? n : undefined;
+}
+
 function barsFromYahooPayload_(payload) {
   var result = payload.chart.result[0];
   var ts = result.timestamp || [];
   var quote = (result.indicators && result.indicators.quote && result.indicators.quote[0]) || {};
   var closes = quote.close || [];
+  var opens = quote.open || [];
+  var highs = quote.high || [];
+  var lows = quote.low || [];
+  var volumes = quote.volume || [];
   var adj =
     (result.indicators &&
       result.indicators.adjclose &&
@@ -169,7 +179,16 @@ function barsFromYahooPayload_(payload) {
     var c = closes[i];
     if (c === null || c === undefined) c = adj[i];
     if (c === null || c === undefined) continue;
-    bars.push({ date: unixToIso_(ts[i]), close: Number(c) });
+    var bar = { date: unixToIso_(ts[i]), close: Number(c) };
+    var o = numOrUndef_(opens[i]);
+    var h = numOrUndef_(highs[i]);
+    var l = numOrUndef_(lows[i]);
+    var v = numOrUndef_(volumes[i]);
+    if (o !== undefined) bar.open = o;
+    if (h !== undefined) bar.high = h;
+    if (l !== undefined) bar.low = l;
+    if (v !== undefined && v >= 0) bar.volume = v;
+    bars.push(bar);
   }
   return bars;
 }
@@ -229,7 +248,16 @@ function boursoramaGetTicksEod_(symbol, length) {
     if (row == null || row.c === null || row.c === undefined) continue;
     var day = Number(row.d);
     if (!isFinite(day)) continue;
-    bars.push({ date: unixToIso_(Math.floor(day * 86400)), close: Number(row.c) });
+    var bar = { date: unixToIso_(Math.floor(day * 86400)), close: Number(row.c) };
+    var o = numOrUndef_(row.o);
+    var h = numOrUndef_(row.h);
+    var l = numOrUndef_(row.l);
+    var v = numOrUndef_(row.v);
+    if (o !== undefined) bar.open = o;
+    if (h !== undefined) bar.high = h;
+    if (l !== undefined) bar.low = l;
+    if (v !== undefined && v >= 0) bar.volume = v;
+    bars.push(bar);
   }
   try {
     if (bars.length) cache.put(ckey, JSON.stringify(bars), HISTORY_TTL_SEC);

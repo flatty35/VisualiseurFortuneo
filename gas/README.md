@@ -34,8 +34,8 @@ VITE_PROXY_URL=https://script.google.com/macros/s/XXXX/exec
 |--------|--------|---------|
 | `price` | `ticker` | `{ price }` |
 | `bulk` | `tickers=A,B` | `{ prices: { A, B } }` |
-| `history` | `ticker` + `days` **ou** `period1`/`period2` | `{ bars: [{ date, close }] }` — Yahoo, sinon Boursorama EOD |
-| `historybulk` | `tickers=A,B,…` + `period1`/`period2` | `{ histories: { A: bars, B: bars } }` — Yahoo `fetchAll` + fallback Boursorama si vide |
+| `history` | `ticker` + `days` **ou** `period1`/`period2` | `{ bars: [{ date, close, open?, high?, low?, volume? }] }` — Yahoo OHLCV, sinon Boursorama EOD |
+| `historybulk` | `tickers=A,B,…` + `period1`/`period2` | `{ histories: { A: bars, B: bars } }` — Yahoo `fetchAll` OHLCV + fallback Boursorama si vide |
 | `search` | `q` (nom ou ISIN public) | `{ quotes: [{ symbol, … }] }` |
 | `openfigi` | `q` = ISIN, optionnel `venues=pa-am` | `{ ticker, exchCode }` (PAR → `.PA`, NA → `.AS`) |
 | `openfigibatch` | `isins=ISIN1,ISIN2,…` (max ~100) | `{ results: [{ isin, ticker?, exchCode? }] }` — **Paris/Amsterdam uniquement** |

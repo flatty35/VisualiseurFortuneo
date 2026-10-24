@@ -124,6 +124,10 @@ export interface EnvelopeMeta {
 export interface QuoteBar {
   date: string // YYYY-MM-DD
   close: number
+  open?: number
+  high?: number
+  low?: number
+  volume?: number
 }
 
 export interface QuoteSeries {

@@ -762,3 +762,102 @@ button.linkish:hover {
   pointer-events: none !important;
   border-radius: 8px !important;
 }
+
+/* Signaux — score pills + reason popover */
+.signals-table .signal-title {
+  font-weight: 600;
+}
+
+.score-cell {
+  position: relative;
+  min-width: 9rem;
+}
+
+.score-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.25rem 0.45rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--ink);
+}
+
+.score-pill:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+.score-strong-buy {
+  background: rgba(34, 195, 142, 0.2);
+  color: var(--ok);
+}
+
+.score-buy {
+  background: rgba(34, 195, 142, 0.12);
+  color: var(--ok);
+}
+
+.score-sell {
+  background: rgba(242, 85, 90, 0.12);
+  color: #ff8a8e;
+}
+
+.score-strong-sell {
+  background: rgba(242, 85, 90, 0.22);
+  color: #ff8a8e;
+}
+
+.score-neutral {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--ink-muted);
+}
+
+.score-popover {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  top: calc(100% + 4px);
+  min-width: 18rem;
+  max-width: min(24rem, 90vw);
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+  background: var(--panel, #141a22);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  text-align: left;
+  font-weight: 400;
+}
+
+.score-popover-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.score-popover ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+}
+
+.score-popover-info {
+  margin-top: 0.5rem;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+}
+
+.score-popover-foot {
+  margin: 0.65rem 0 0;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 800px) {
+  .score-popover-cols {
+    grid-template-columns: 1fr;
+  }
+}

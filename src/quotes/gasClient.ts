@@ -16,6 +16,18 @@ export class QuoteProxyError extends Error {
   }
 }
 
+/** Keep OHLCV fields when the proxy sends them (close-only remains valid). */
+export function normalizeQuoteBar(b: QuoteBar): QuoteBar {
+  const out: QuoteBar = { date: b.date, close: b.close }
+  if (b.open !== undefined && Number.isFinite(b.open)) out.open = b.open
+  if (b.high !== undefined && Number.isFinite(b.high)) out.high = b.high
+  if (b.low !== undefined && Number.isFinite(b.low)) out.low = b.low
+  if (b.volume !== undefined && Number.isFinite(b.volume) && b.volume >= 0) {
+    out.volume = b.volume
+  }
+  return out
+}
+
 function assertProxyConfigured(): string {
   if (!PROXY_URL || PROXY_URL.includes('YOUR_DEPLOYMENT')) {
     throw new QuoteProxyError(
@@ -95,10 +107,7 @@ export async function fetchHistory(
     ticker: t,
     days: String(d),
   })
-  return (data.bars ?? []).map((b) => ({
-    date: b.date,
-    close: b.close,
-  }))
+  return (data.bars ?? []).map(normalizeQuoteBar)
 }
 
 export async function fetchHistoryRange(
@@ -117,10 +126,7 @@ export async function fetchHistoryRange(
     period1,
     period2,
   })
-  return (data.bars ?? []).map((b) => ({
-    date: b.date,
-    close: b.close,
-  }))
+  return (data.bars ?? []).map(normalizeQuoteBar)
 }
 
 /**
@@ -161,10 +167,7 @@ export async function fetchHistoryBulk(
           90_000,
         )
         for (const [ticker, bars] of Object.entries(data.histories ?? {})) {
-          out.set(
-            ticker,
-            (bars ?? []).map((b) => ({ date: b.date, close: b.close })),
-          )
+          out.set(ticker, (bars ?? []).map(normalizeQuoteBar))
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)

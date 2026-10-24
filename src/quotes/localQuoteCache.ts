@@ -20,12 +20,23 @@ function todayISO(): string {
 }
 
 function mergeBars(existing: QuoteBar[], incoming: QuoteBar[]): QuoteBar[] {
-  const map = new Map<string, number>()
-  for (const b of existing) map.set(b.date, b.close)
-  for (const b of incoming) map.set(b.date, b.close)
-  return [...map.entries()]
-    .map(([date, close]) => ({ date, close }))
-    .sort((a, b) => a.date.localeCompare(b.date))
+  const map = new Map<string, QuoteBar>()
+  for (const b of existing) map.set(b.date, b)
+  for (const b of incoming) map.set(b.date, b)
+  return [...map.values()].sort((a, b) => a.date.localeCompare(b.date))
+}
+
+/** True when recent bars carry high+low (Yahoo OHLCV refresh done). */
+export function historyHasOhlc(bars: QuoteBar[] | undefined): boolean {
+  if (!bars?.length) return false
+  const recent = bars.slice(-40)
+  return recent.some(
+    (b) =>
+      b.high !== undefined &&
+      b.low !== undefined &&
+      Number.isFinite(b.high) &&
+      Number.isFinite(b.low),
+  )
 }
 
 /**
@@ -100,6 +111,8 @@ interface RefreshPlan {
   isin?: string
   yahooTicker?: string
   cached?: QuoteSeries
+  /** Skip Morningstar — upgrade close-only cache to Yahoo OHLCV. */
+  forceYahooOhlc?: boolean
 }
 
 /** Morningstar series of the best listing (null = not covered). */
@@ -156,16 +169,22 @@ export async function refreshQuotesForSupports(
   const plans: RefreshPlan[] = []
   keys.forEach((key, i) => {
     const cached = cachedRows[i]
-    if (historyIsFresh(cached, start, end)) {
+    const s = byKey.get(key)!
+    // Yahoo tickers: force one refresh if cache is close-only (no high/low yet)
+    const needsOhlc =
+      Boolean(s.yahooTicker) &&
+      Boolean(cached?.bars?.length) &&
+      !historyHasOhlc(cached?.bars)
+    if (historyIsFresh(cached, start, end) && !needsOhlc) {
       skipped++
       return
     }
-    const s = byKey.get(key)!
     plans.push({
       key,
       isin: isValidIsin(s.isin) ? s.isin.toUpperCase() : undefined,
       yahooTicker: s.yahooTicker,
       cached,
+      forceYahooOhlc: needsOhlc || undefined,
     })
   })
   if (!plans.length) return { updated, errors, skipped }
@@ -183,17 +202,25 @@ export async function refreshQuotesForSupports(
   }
 
   // 1) Morningstar — one screener call for all ISINs, then series concurrently
+  //    (skipped when upgrading an existing cache to Yahoo OHLCV)
   onProgress?.({ current: 0, total, ticker: 'Morningstar…' })
   let listings: MorningstarHit[] = []
   try {
     listings = await searchMorningstarByIsins(
-      plans.map((p) => p.isin).filter((i): i is string => Boolean(i)),
+      plans
+        .filter((p) => !p.forceYahooOhlc)
+        .map((p) => p.isin)
+        .filter((i): i is string => Boolean(i)),
     )
   } catch {
     // Everything falls through to the proxy
   }
   const forProxy: RefreshPlan[] = []
   await mapPool(plans, 6, async (plan) => {
+    if (plan.forceYahooOhlc) {
+      forProxy.push(plan)
+      return
+    }
     let bars: QuoteBar[] | null = null
     try {
       bars = await morningstarHistory(plan, listings, start)
